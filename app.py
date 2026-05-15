@@ -88,6 +88,7 @@ DEFAULTS = {
     "retrieved_chunks": None,
     "generated_draft": None,
     "output_file_path": None,
+    "condensed_file_path": None,
     "filters": {"geography": [], "thematic_areas": [], "funder": []},
     "sections": None,   # None = all sections
     "progress_steps": [
@@ -96,6 +97,7 @@ DEFAULTS = {
         {"label": "Capability library searched",  "status": "pending"},
         {"label": "Generating draft",             "status": "pending"},
         {"label": "Formatting document",          "status": "pending"},
+        {"label": "Generating condensed version", "status": "pending"},
     ],
 }
 for key, default in DEFAULTS.items():
@@ -243,53 +245,6 @@ st.subheader("Step 2: Select Filters and Options")
 
 from config import GEOGRAPHY_OPTIONS, THEMATIC_OPTIONS, FUNDER_OPTIONS
 
-# ---------------------------------------------------------------------------
-# Filter normalization helpers
-# ---------------------------------------------------------------------------
-
-_GEO_NORMALIZE = {
-    "Western Hemisphere": "Regional / LATAM",
-    "Latin America": "Regional / LATAM",
-    "LATAM": "Regional / LATAM",
-    "Caribbean": "Caribbean",
-    "Central America": "Central America",
-    "Mexico": "Mexico",
-    "Colombia": "Colombia",
-    "Peru": "Peru",
-    "Brazil": "Brazil",
-    "Argentina": "Argentina",
-    "Chile": "Chile",
-}
-
-_THEMATIC_NORMALIZE = {
-    "Counterterrorism": "CTF/Terrorist Financing",
-    "Terrorist Financing": "CTF/Terrorist Financing",
-    "Financial Disruption": "AML/CFT",
-    "AML": "AML/CFT",
-    "CFT": "AML/CFT",
-    "Anti-money laundering": "AML/CFT",
-    "Illicit Finance": "Illicit Financial Flows",
-    "Illicit Financial Flows": "Illicit Financial Flows",
-    "Asset Recovery": "Asset Recovery",
-    "Anti-corruption": "Anti-corruption",
-    "Justice Reform": "Justice Reform",
-}
-
-
-def _normalize_filter_values(values: list, normalize_map: dict, valid_options: list) -> list:
-    """
-    Map extracted values to the closest matching option using normalize_map,
-    then keep only values that exist in valid_options. Preserves order, no duplicates.
-    """
-    result = []
-    seen = set()
-    for v in values:
-        mapped = normalize_map.get(v, v)  # map if known, else keep as-is
-        if mapped in valid_options and mapped not in seen:
-            result.append(mapped)
-            seen.add(mapped)
-    return result
-
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -348,6 +303,12 @@ sections_to_include = st.multiselect(
 )
 st.session_state.sections = sections_to_include if sections_to_include else ALL_SECTIONS
 
+condensed_mode = st.checkbox(
+    "Generate condensed version (5 pages)",
+    value=False,
+    key="condensed_mode",
+)
+
 # ---------------------------------------------------------------------------
 # STEP 3 — Generate (8.7 / 8.8 / 8.9)
 # ---------------------------------------------------------------------------
@@ -381,6 +342,7 @@ if generate_button and can_generate:
     # Reset progress
     for step in st.session_state.progress_steps:
         step["status"] = "pending"
+    st.session_state.condensed_file_path = None
 
     try:
         # Progress display container
@@ -442,6 +404,93 @@ if generate_button and can_generate:
 
             st.session_state.output_file_path = output_path
         update_progress(4, "done")
+
+        # Step: Condensed version (optional)
+        if condensed_mode:
+            update_progress(5, "active")
+            with st.spinner("Generating condensed version..."):
+                try:
+                    import anthropic as _anthropic
+                    from datetime import datetime as _dt
+
+                    # Step 1 — Build condensed input from all section texts
+                    draft_sections = st.session_state.generated_draft.get("sections", {})
+                    section_texts = []
+                    for key, val in draft_sections.items():
+                        if key == "country_table":
+                            continue  # skip list; handled by formatter
+                        if isinstance(val, str) and val.strip():
+                            section_texts.append(val)
+                    full_draft_text = "\n\n".join(section_texts)
+
+                    # Step 2 — Call Claude API directly
+                    _condensed_system = (
+                        "You are a professional document editor. "
+                        "Condense this capability statement to 8 pages maximum. "
+                        "You must follow these rules exactly: "
+                        "reproduce the country table section completely without any changes; "
+                        "keep the three strongest project cards in full; "
+                        "shorten geographic experience to two sentences per country; "
+                        "shorten thematic areas to two bullet points per theme; "
+                        "keep all citation tags; "
+                        "never invent content."
+                    )
+
+                    # Step 3 — User prompt
+                    _condensed_user = (
+                        "Condense the following capability statement. "
+                        "Return only the condensed text with all citation tags preserved. "
+                        "Do not return JSON. "
+                        "Do not add headings that were not in the original.\n\n"
+                        f"{full_draft_text}"
+                    )
+
+                    _condensed_client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+                    _condensed_response = _condensed_client.messages.create(
+                        model="claude-sonnet-4-5",
+                        max_tokens=8000,
+                        system=_condensed_system,
+                        messages=[{"role": "user", "content": _condensed_user}],
+                    )
+                    condensed_text = _condensed_response.content[0].text
+
+                    # Step 4 — Write condensed .docx
+                    from output_formatter import write_output as _write_output
+                    condensed_draft = {
+                        "sections": {"opening_statement": condensed_text},
+                        "interpretation_log": [],
+                        "summary": st.session_state.generated_draft.get("summary", {}),
+                    }
+                    condensed_filename_ts = _dt.now().strftime("%Y-%m-%d_%H-%M")
+                    condensed_out_path = os.path.join(
+                        os.path.abspath(OUTPUT_PATH),
+                        f"GovRisk_CapabilityStatement_Condensed_{condensed_filename_ts}.docx",
+                    )
+                    os.makedirs(os.path.abspath(OUTPUT_PATH), exist_ok=True)
+
+                    from docx import Document as _Document
+                    from docx.shared import Pt as _Pt, Cm as _Cm
+                    _cdoc = _Document()
+                    for _sec in _cdoc.sections:
+                        _sec.top_margin = _Cm(2.5)
+                        _sec.bottom_margin = _Cm(2.5)
+                        _sec.left_margin = _Cm(2.5)
+                        _sec.right_margin = _Cm(2.5)
+                    for _para_text in condensed_text.split("\n\n"):
+                        _para_text = _para_text.strip()
+                        if _para_text:
+                            _p = _cdoc.add_paragraph()
+                            _r = _p.add_run(_para_text)
+                            _r.font.size = _Pt(11)
+                            _r.font.name = "Calibri"
+                    _cdoc.save(condensed_out_path)
+
+                    # Step 5 — Store path
+                    st.session_state.condensed_file_path = condensed_out_path
+
+                except Exception as e:
+                    st.error(f"Condensed generation failed: {e}")
+            update_progress(5, "done")
 
         st.success("✅ Capability statement generated successfully!")
 
@@ -509,3 +558,18 @@ if st.session_state.generated_draft and st.session_state.output_file_path:
         )
     except Exception as e:
         st.error(f"Could not prepare download: {e}")
+
+    # Condensed download button (shown only if condensed version was generated)
+    if st.session_state.get("condensed_file_path"):
+        try:
+            with open(st.session_state.condensed_file_path, "rb") as f:
+                condensed_bytes = f.read()
+            condensed_filename = os.path.basename(st.session_state.condensed_file_path)
+            st.download_button(
+                label="📄 Download Condensed Version (.docx)",
+                data=condensed_bytes,
+                file_name=condensed_filename,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        except Exception as e:
+            st.error(f"Could not prepare condensed download: {e}")
