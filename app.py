@@ -334,7 +334,7 @@ sections_to_include = st.multiselect(
 st.session_state.sections = sections_to_include if sections_to_include else ALL_SECTIONS
 
 condensed_mode = st.checkbox(
-    "Generate condensed version (5 pages)",
+    "Generate condensed version (8-10 pages)",
     value=False,
     key="condensed_mode",
 )
@@ -442,37 +442,50 @@ if generate_button and can_generate:
             with st.spinner("Generating condensed version..."):
                 try:
                     import anthropic as _anthropic
+                    import json as _json
                     from datetime import datetime as _dt
+                    from draft_generator import _strip_markdown_fences as _strip_fences
 
-                    # Step 1 — Build condensed input from all section texts
+                    # Step 1 — Extract original country_table (never condense it)
                     draft_sections = st.session_state.generated_draft.get("sections", {})
+                    original_country_table = draft_sections.get("country_table", [])
+
+                    # Build input text from all string sections
+                    section_order = [
+                        "opening_statement",
+                        "institutional_overview",
+                        "geographic_experience",
+                        "thematic_areas",
+                        "selected_project_experience",
+                        "alignment_with_tor",
+                    ]
                     section_texts = []
-                    for key, val in draft_sections.items():
-                        if key == "country_table":
-                            continue  # skip list; handled by formatter
+                    for key in section_order:
+                        val = draft_sections.get(key, "")
                         if isinstance(val, str) and val.strip():
-                            section_texts.append(val)
+                            section_texts.append(f"[SECTION:{key}]\n{val}")
                     full_draft_text = "\n\n".join(section_texts)
 
-                    # Step 2 — Call Claude API directly
+                    # Step 2 — Call Claude API
                     _condensed_system = (
                         "You are a professional document editor. "
-                        "Condense this capability statement to 8 pages maximum. "
-                        "You must follow these rules exactly: "
-                        "reproduce the country table section completely without any changes; "
-                        "keep the three strongest project cards in full; "
-                        "shorten geographic experience to two sentences per country; "
-                        "shorten thematic areas to two bullet points per theme; "
-                        "keep all citation tags; "
-                        "never invent content."
+                        "Condense this capability statement to 8-10 pages. "
+                        "Rules: shorten geographic experience to two sentences per country; "
+                        "compress thematic areas to three bullet points per theme; "
+                        "keep the three strongest project cards with full detail; "
+                        "keep all citation tags in format REF:filename:page_N; "
+                        "never invent content; "
+                        "preserve past tense for completed and present tense with ongoing marker for active projects. "
+                        "Return a JSON object with these exact keys: opening_statement, institutional_overview, "
+                        "geographic_experience, thematic_areas, selected_project_experience, alignment_with_tor. "
+                        "Each value is the condensed text for that section."
                     )
 
-                    # Step 3 — User prompt
                     _condensed_user = (
-                        "Condense the following capability statement. "
-                        "Return only the condensed text with all citation tags preserved. "
-                        "Do not return JSON. "
-                        "Do not add headings that were not in the original.\n\n"
+                        "Condense the following capability statement sections. "
+                        "Each section is marked with [SECTION:key]. "
+                        "Return a JSON object with the same keys and condensed text values. "
+                        "Preserve all [REF:filename:page_N] citation tags.\n\n"
                         f"{full_draft_text}"
                     )
 
@@ -483,43 +496,65 @@ if generate_button and can_generate:
                         system=_condensed_system,
                         messages=[{"role": "user", "content": _condensed_user}],
                     )
-                    condensed_text = _condensed_response.content[0].text
+                    condensed_raw = _condensed_response.content[0].text
 
-                    # Step 4 — Write condensed .docx
-                    from output_formatter import write_output as _write_output
+                    # Step 3 — Parse response using _strip_markdown_fences
+                    try:
+                        cleaned = _strip_fences(condensed_raw)
+                        condensed_sections = _json.loads(cleaned)
+                    except Exception:
+                        # Fallback: put entire response in opening_statement
+                        condensed_sections = {k: "" for k in section_order}
+                        condensed_sections["opening_statement"] = condensed_raw
+
+                    # Ensure all section keys exist
+                    for _k in section_order:
+                        if _k not in condensed_sections:
+                            condensed_sections[_k] = ""
+
+                    # Step 4 — Restore original country_table
+                    condensed_sections["country_table"] = original_country_table
+
                     condensed_draft = {
-                        "sections": {"opening_statement": condensed_text},
+                        "sections": condensed_sections,
                         "interpretation_log": [],
                         "summary": st.session_state.generated_draft.get("summary", {}),
                     }
+
+                    # Step 5 — Tag citations and write output
+                    from citation_tagger import tag_citations as _tag_citations
+                    from output_formatter import write_output as _write_output
+
+                    _condensed_citations = _tag_citations(condensed_sections)
+
                     condensed_filename_ts = _dt.now().strftime("%Y-%m-%d_%H-%M")
-                    condensed_out_path = os.path.join(
-                        os.path.abspath(OUTPUT_PATH),
-                        f"GovRisk_CapabilityStatement_Condensed_{condensed_filename_ts}.docx",
+                    _condensed_out_dir = os.path.abspath(OUTPUT_PATH)
+                    os.makedirs(_condensed_out_dir, exist_ok=True)
+
+                    _condensed_result = _write_output(
+                        condensed_draft,
+                        _condensed_citations,
+                        output_language=output_language,
+                        sections_to_include=None,
+                        output_path=_condensed_out_dir,
                     )
-                    os.makedirs(os.path.abspath(OUTPUT_PATH), exist_ok=True)
 
-                    from docx import Document as _Document
-                    from docx.shared import Pt as _Pt, Cm as _Cm
-                    _cdoc = _Document()
-                    for _sec in _cdoc.sections:
-                        _sec.top_margin = _Cm(2.5)
-                        _sec.bottom_margin = _Cm(2.5)
-                        _sec.left_margin = _Cm(2.5)
-                        _sec.right_margin = _Cm(2.5)
-                    for _para_text in condensed_text.split("\n\n"):
-                        _para_text = _para_text.strip()
-                        if _para_text:
-                            _p = _cdoc.add_paragraph()
-                            _r = _p.add_run(_para_text)
-                            _r.font.size = _Pt(11)
-                            _r.font.name = "Calibri"
-                    _cdoc.save(condensed_out_path)
-
-                    # Step 5 — Store path
-                    st.session_state.condensed_file_path = condensed_out_path
+                    # Rename to condensed filename
+                    if not _condensed_result.startswith("ERROR:"):
+                        condensed_out_path = os.path.join(
+                            _condensed_out_dir,
+                            f"GovRisk_CapabilityStatement_Condensed_{condensed_filename_ts}.docx",
+                        )
+                        import shutil as _shutil
+                        _shutil.move(_condensed_result, condensed_out_path)
+                        # Step 6 — Store absolute path
+                        st.session_state.condensed_file_path = os.path.abspath(condensed_out_path)
+                    else:
+                        st.error(f"Condensed formatting failed: {_condensed_result}")
 
                 except Exception as e:
+                    import traceback
+                    traceback.print_exc()
                     st.error(f"Condensed generation failed: {e}")
             update_progress(5, "done")
 
