@@ -1,0 +1,4 @@
+# file: C:\Users\jage2\OneDrive\Desktop\ITenlace\2026\proposal-tool\proposal_tool\citation_tagger.py
+# hypothesis_version: 6.151.4
+
+['\\[REF:[^\\]]+\\]', 'citations', 'filename', 'page', 'paragraphs', 'text']

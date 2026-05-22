@@ -77,26 +77,33 @@ def _none_if_zero(value) -> "int | None":
 def _chunk_satisfies_filters(metadata: dict, filters: dict) -> bool:
     """
     Check whether a chunk's metadata satisfies the active filters.
-    AND logic between filter types, OR logic within each type.
-    A filter type is inactive (skipped) if its list is empty.
+    OR logic between geography and thematic_areas — a chunk is included if it
+    matches geography OR thematic_areas. Only excluded if both are active and
+    chunk matches neither. Funder is an additional AND constraint.
+    Within each filter type, OR logic applies (any matching value is sufficient).
     """
     geo_filter = filters.get("geography", [])
     thematic_filter = filters.get("thematic_areas", [])
     funder_filter = filters.get("funder", [])
 
-    # Geography filter
-    if geo_filter:
-        chunk_geo = _parse_json_list(metadata.get("geography", "[]"))
-        if not any(g in chunk_geo for g in geo_filter):
+    # OR logic between geography and thematic_areas
+    if geo_filter or thematic_filter:
+        geo_match = False
+        thematic_match = False
+
+        if geo_filter:
+            chunk_geo = _parse_json_list(metadata.get("geography", "[]"))
+            geo_match = any(g in chunk_geo for g in geo_filter)
+
+        if thematic_filter:
+            chunk_thematic = _parse_json_list(metadata.get("thematic_areas", "[]"))
+            thematic_match = any(t in chunk_thematic for t in thematic_filter)
+
+        # Include if matches geography OR thematic_areas
+        if not (geo_match or thematic_match):
             return False
 
-    # Thematic areas filter
-    if thematic_filter:
-        chunk_thematic = _parse_json_list(metadata.get("thematic_areas", "[]"))
-        if not any(t in chunk_thematic for t in thematic_filter):
-            return False
-
-    # Funder filter — stored in donor field
+    # Funder filter — additional AND constraint
     if funder_filter:
         chunk_donor = metadata.get("donor", "") or ""
         if not any(f.lower() in chunk_donor.lower() for f in funder_filter):

@@ -61,6 +61,21 @@ _THEMATIC_NORMALIZE = {
     "Asset Recovery": "Asset Recovery",
     "Anti-corruption": "Anti-corruption",
     "Justice Reform": "Justice Reform",
+    "Law Enforcement": "Justice Reform",
+    "Criminal Justice": "Justice Reform",
+    "Prosecutorial Capacity Building": "Justice Reform",
+    "Counter-Narcotics": "AML/CFT",
+    "Organized Crime": "Illicit Financial Flows",
+    "Transnational Criminal Organizations": "CTF/Terrorist Financing",
+    "Cross-border Cooperation": "Justice Reform",
+    "Evidence Handling": "Justice Reform",
+}
+
+_FUNDER_NORMALIZE = {
+    "Bureau of International Narcotics": "US State Dept",
+    "INL": "US State Dept",
+    "U.S. Department of State": "US State Dept",
+    "US Department of State": "US State Dept",
 }
 
 
@@ -77,6 +92,18 @@ def _normalize_filter_values(values: list, normalize_map: dict, valid_options: l
             result.append(mapped)
             seen.add(mapped)
     return result
+
+
+def _normalize_funder(funder_str: str) -> list:
+    """
+    Match a funder string against _FUNDER_NORMALIZE using substring matching.
+    Returns a list with the normalized value if a match is found, else empty list.
+    """
+    funder_lower = funder_str.lower()
+    for key, value in _FUNDER_NORMALIZE.items():
+        if key.lower() in funder_lower:
+            return [value]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +246,9 @@ if uploaded_file is not None:
                     )
                     st.session_state.filters["thematic_areas"] = _normalize_filter_values(
                         tor_data.get("thematic_areas", []), _THEMATIC_NORMALIZE, THEMATIC_OPTIONS
+                    )
+                    st.session_state.filters["funder"] = _normalize_funder(
+                        tor_data.get("funder", "")
                     )
                     # Update progress
                     st.session_state.progress_steps[0]["status"] = "done"
@@ -379,6 +409,7 @@ if generate_button and can_generate:
                 st.error(f"Generation failed: {generated_draft['error']}")
                 st.stop()
             st.session_state.generated_draft = generated_draft
+            print('COUNTRY_TABLE_SAMPLE:', st.session_state.generated_draft.get('sections', {}).get('country_table', [])[:2])
         update_progress(3, "done")
 
         # Step: Format document
@@ -545,7 +576,7 @@ if st.session_state.generated_draft and st.session_state.output_file_path:
 
     # Download button (8.11)
     try:
-        with open(st.session_state.output_file_path, "rb") as f:
+        with open(os.path.abspath(st.session_state.output_file_path), "rb") as f:
             docx_bytes = f.read()
 
         filename = os.path.basename(st.session_state.output_file_path)
