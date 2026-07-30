@@ -120,7 +120,7 @@ def test_system_prompt_contains_required_instruction():
     with patch("tor_extractor.anthropic.Anthropic", return_value=mock_client_instance):
         extract_tor(docx_bytes, "test.docx")
 
-    assert "Respond ONLY with valid JSON" in captured_system_prompt["system"]
+    assert "Return ONLY valid JSON" in captured_system_prompt["system"]
 
 
 # ---------------------------------------------------------------------------
@@ -247,3 +247,105 @@ def test_error_state_source_file_matches_filename():
     """Error state dict always has source_file equal to the filename argument."""
     result = extract_tor(b"data", "my_file.csv")
     assert result["source_file"] == "my_file.csv"
+
+# ---------------------------------------------------------------------------
+# Component 3a — New schema tests (paragraphs + source_map)
+# ---------------------------------------------------------------------------
+
+def _make_full_tor_json(**overrides):
+    """Return a complete tor_data JSON string with paragraphs and source_map."""
+    base = {
+        "title": "Test ToR",
+        "funder": "US State Dept",
+        "geography": ["Mexico"],
+        "thematic_areas": ["AML/CFT"],
+        "key_requirements": ["Risk assessment"],
+        "evaluation_criteria": [],
+        "language": "English",
+        "source_file": "test.docx",
+        "extraction_confidence": "HIGH",
+        "paragraphs": [
+            "This is the first paragraph about Mexico.",
+            "AML/CFT capacity building is required.",
+            "The funder is the US State Department.",
+        ],
+        "source_map": {
+            "geography": [{"term": "Mexico", "paragraph_index": 0, "snippet": "This is the first paragraph about Mexico."}],
+            "thematic_areas": [{"term": "AML/CFT", "paragraph_index": 1, "snippet": "AML/CFT capacity building is required."}],
+            "funder": [{"term": "US State Dept", "paragraph_index": 2, "snippet": "The funder is the US State Department."}],
+            "key_requirements": [{"term": "Risk assessment", "paragraph_index": 1, "snippet": "AML/CFT capacity building is required."}],
+        },
+    }
+    base.update(overrides)
+    return json.dumps(base)
+
+
+def _make_mock(response_text):
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock(text=response_text)]
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_response
+    return mock_client
+
+
+def test_paragraphs_key_present_in_output():
+    """Mock Claude returns tor_data with paragraphs list of 3 strings. Assert result has 3 paragraphs."""
+    docx_bytes = make_minimal_docx()
+    mock_client = _make_mock(_make_full_tor_json())
+    with patch("tor_extractor.anthropic.Anthropic", return_value=mock_client):
+        result = extract_tor(docx_bytes, "test.docx")
+    assert "paragraphs" in result
+    assert isinstance(result["paragraphs"], list)
+    assert len(result["paragraphs"]) == 3
+
+
+def test_source_map_key_present_in_output():
+    """Mock Claude returns tor_data with source_map. Assert all four sub-keys present."""
+    docx_bytes = make_minimal_docx()
+    mock_client = _make_mock(_make_full_tor_json())
+    with patch("tor_extractor.anthropic.Anthropic", return_value=mock_client):
+        result = extract_tor(docx_bytes, "test.docx")
+    assert "source_map" in result
+    assert isinstance(result["source_map"], dict)
+    for key in ("geography", "thematic_areas", "funder", "key_requirements"):
+        assert key in result["source_map"], f"source_map missing key: {key}"
+
+
+def test_paragraphs_defaults_to_empty_list_on_missing_key():
+    """Mock Claude returns tor_data WITHOUT paragraphs key. Assert result['paragraphs'] == []."""
+    docx_bytes = make_minimal_docx()
+    # JSON without paragraphs key
+    partial_json = json.dumps({
+        "title": "Test", "funder": "Test", "geography": [], "thematic_areas": [],
+        "key_requirements": [], "evaluation_criteria": [], "language": "English",
+        "source_file": "test.docx", "extraction_confidence": "MEDIUM",
+    })
+    mock_client = _make_mock(partial_json)
+    with patch("tor_extractor.anthropic.Anthropic", return_value=mock_client):
+        result = extract_tor(docx_bytes, "test.docx")
+    assert result["paragraphs"] == []
+
+
+def test_source_map_defaults_to_empty_structure_on_missing_key():
+    """Mock Claude returns tor_data WITHOUT source_map key. Assert sub-keys default to []."""
+    docx_bytes = make_minimal_docx()
+    partial_json = json.dumps({
+        "title": "Test", "funder": "Test", "geography": [], "thematic_areas": [],
+        "key_requirements": [], "evaluation_criteria": [], "language": "English",
+        "source_file": "test.docx", "extraction_confidence": "MEDIUM",
+    })
+    mock_client = _make_mock(partial_json)
+    with patch("tor_extractor.anthropic.Anthropic", return_value=mock_client):
+        result = extract_tor(docx_bytes, "test.docx")
+    assert result["source_map"]["geography"] == []
+    assert result["source_map"]["thematic_areas"] == []
+
+
+def test_existing_geography_key_still_present():
+    """Backward compatibility: result['geography'] is still present and is a list."""
+    docx_bytes = make_minimal_docx()
+    mock_client = _make_mock(_make_full_tor_json())
+    with patch("tor_extractor.anthropic.Anthropic", return_value=mock_client):
+        result = extract_tor(docx_bytes, "test.docx")
+    assert "geography" in result
+    assert isinstance(result["geography"], list)

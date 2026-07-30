@@ -176,3 +176,58 @@ def test_p_no_unselected_project_chunks_in_output(sample_chunks, selections):
     assert len(overlap) == 0, (
         f"Chunks from deselected projects appeared in selected_chunks: {overlap}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Component 6+7 — Geography/thematic defaults tests
+# ---------------------------------------------------------------------------
+
+def test_geo_priority_options_from_tor_data():
+    """Geography priority options built from confirmed tor_data."""
+    confirmed_geos = ["Brazil", "Colombia"]
+    geo_priority_options = confirmed_geos + ["All equally weighted"]
+    assert "Brazil" in geo_priority_options
+    assert "All equally weighted" in geo_priority_options
+    assert geo_priority_options[0] == "Brazil"
+
+
+def test_geo_priority_fallback_when_no_geography():
+    """When no geography in tor_data, only 'All equally weighted' available."""
+    confirmed_geos = []
+    geo_priority_options = confirmed_geos + ["All equally weighted"]
+    if not confirmed_geos:
+        geo_priority_options = ["All equally weighted"]
+    assert geo_priority_options == ["All equally weighted"]
+
+
+def test_thematic_defaults_to_confirmed_themes():
+    """Thematic defaults are the confirmed themes directly (not filtered against fixed list)."""
+    confirmed = ["AML/CFT", "Justice Reform"]
+    thematic_options = ["AML/CFT", "CTF/Terrorist Financing", "Justice Reform", "Anti-corruption"]
+    # Combined options = confirmed first + remaining fixed options
+    combined_options = list(confirmed) + [t for t in thematic_options if t not in confirmed]
+    # Default is all confirmed themes
+    default = list(confirmed) if confirmed else list(thematic_options)
+    assert default == ["AML/CFT", "Justice Reform"]
+    # All confirmed themes appear in combined_options
+    for theme in confirmed:
+        assert theme in combined_options
+
+
+def test_thematic_defaults_to_all_when_empty():
+    """When no confirmed themes, default to all options."""
+    confirmed = []
+    options = ["AML/CFT", "Justice Reform"]
+    default = [t for t in confirmed if t in options]
+    if not default:
+        default = list(options)
+    assert default == options
+
+
+def test_thematic_skips_unrecognised_terms():
+    """Unrecognised terms from extraction are filtered out of defaults."""
+    confirmed = ["AML/CFT", "Gold Sector"]
+    options = ["AML/CFT", "Justice Reform"]
+    default = [t for t in confirmed if t in options]
+    assert "Gold Sector" not in default
+    assert "AML/CFT" in default

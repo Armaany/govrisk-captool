@@ -1,4 +1,0 @@
-# file: C:\Users\jage2\OneDrive\Desktop\ITenlace\2026\proposal-tool\proposal_tool\config.py
-# hypothesis_version: 6.151.4
-
-[500, './chroma_db/', './output/', 'AML/CFT', 'ANTHROPIC_API_KEY', 'Anti-corruption', 'Argentina', 'Asset Recovery', 'Beneficial Ownership', 'Brazil', 'Caribbean', 'Central America', 'Chile', 'Colombia', 'DNFBP Supervision', 'FIU Strengthening', 'Human Trafficking', 'IADB', 'IDB', 'Justice Reform', 'Mexico', 'Other', 'Peru', 'Regional / LATAM', 'UK FCDO', 'US State Dept', 'USAID', 'claude-sonnet-4-5']

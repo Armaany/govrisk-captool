@@ -30,81 +30,14 @@ def _can_generate(api_key_missing, tor_data, doc_count):
 
 
 # ---------------------------------------------------------------------------
-# Filter normalization helpers
+# ---------------------------------------------------------------------------
+# Imports
 # ---------------------------------------------------------------------------
 
 from config import GEOGRAPHY_OPTIONS, THEMATIC_OPTIONS, FUNDER_OPTIONS
-
-_GEO_NORMALIZE = {
-    "Western Hemisphere": "Regional / LATAM",
-    "Latin America": "Regional / LATAM",
-    "LATAM": "Regional / LATAM",
-    "Caribbean": "Caribbean",
-    "Central America": "Central America",
-    "Mexico": "Mexico",
-    "Colombia": "Colombia",
-    "Peru": "Peru",
-    "Brazil": "Brazil",
-    "Argentina": "Argentina",
-    "Chile": "Chile",
-}
-
-_THEMATIC_NORMALIZE = {
-    "Counterterrorism": "CTF/Terrorist Financing",
-    "Terrorist Financing": "CTF/Terrorist Financing",
-    "Financial Disruption": "AML/CFT",
-    "AML": "AML/CFT",
-    "CFT": "AML/CFT",
-    "Anti-money laundering": "AML/CFT",
-    "Illicit Finance": "Illicit Financial Flows",
-    "Illicit Financial Flows": "Illicit Financial Flows",
-    "Asset Recovery": "Asset Recovery",
-    "Anti-corruption": "Anti-corruption",
-    "Justice Reform": "Justice Reform",
-    "Law Enforcement": "Justice Reform",
-    "Criminal Justice": "Justice Reform",
-    "Prosecutorial Capacity Building": "Justice Reform",
-    "Counter-Narcotics": "AML/CFT",
-    "Organized Crime": "Illicit Financial Flows",
-    "Transnational Criminal Organizations": "CTF/Terrorist Financing",
-    "Cross-border Cooperation": "Justice Reform",
-    "Evidence Handling": "Justice Reform",
-}
-
-_FUNDER_NORMALIZE = {
-    "Bureau of International Narcotics": "US State Dept",
-    "INL": "US State Dept",
-    "U.S. Department of State": "US State Dept",
-    "US Department of State": "US State Dept",
-}
-
-
-def _normalize_filter_values(values: list, normalize_map: dict, valid_options: list) -> list:
-    """
-    Map extracted values to the closest matching option using normalize_map,
-    then keep only values that exist in valid_options. Preserves order, no duplicates.
-    """
-    result = []
-    seen = set()
-    for v in values:
-        mapped = normalize_map.get(v, v)  # map if known, else keep as-is
-        if mapped in valid_options and mapped not in seen:
-            result.append(mapped)
-            seen.add(mapped)
-    return result
-
-
-def _normalize_funder(funder_str: str) -> list:
-    """
-    Match a funder string against _FUNDER_NORMALIZE using substring matching.
-    Returns a list with the normalized value if a match is found, else empty list.
-    """
-    funder_lower = funder_str.lower()
-    for key, value in _FUNDER_NORMALIZE.items():
-        if key.lower() in funder_lower:
-            return [value]
-    return []
-
+from discovery_panel import render_discovery_panel
+from tor_review_panel import render_tor_review
+from draft_review_panel import render_draft_review
 
 # ---------------------------------------------------------------------------
 # Session state initialisation (8.2)
@@ -112,10 +45,16 @@ def _normalize_funder(funder_str: str) -> list:
 
 DEFAULTS = {
     "tor_data": None,
+    "confirmed_tor_data": None,
     "retrieved_chunks": None,
     "generated_draft": None,
+    "approved_draft": None,
     "output_file_path": None,
     "condensed_file_path": None,
+    "discovery_result": None,
+    "drp_regen_request": None,
+    "drp_trigger_generate": False,
+    "last_chunks_used": [],
     "filters": {"geography": [], "thematic_areas": [], "funder": []},
     "sections": None,   # None = all sections
     "progress_steps": [
@@ -239,78 +178,33 @@ if uploaded_file is not None:
                 st.session_state.retrieved_chunks = None
                 st.session_state.generated_draft = None
                 st.session_state.output_file_path = None
-                # Auto-populate filters from tor_data
+                st.session_state.confirmed_tor_data = None
+                st.session_state["trp_initialised"] = False
+                st.session_state["drp_initialised"] = False
+                st.session_state.approved_draft = None
+                st.session_state.drp_regen_request = None
                 if "error" not in tor_data:
-                    st.session_state.filters["geography"] = _normalize_filter_values(
-                        tor_data.get("geography", []), _GEO_NORMALIZE, GEOGRAPHY_OPTIONS
-                    )
-                    st.session_state.filters["thematic_areas"] = _normalize_filter_values(
-                        tor_data.get("thematic_areas", []), _THEMATIC_NORMALIZE, THEMATIC_OPTIONS
-                    )
-                    st.session_state.filters["funder"] = _normalize_funder(
-                        tor_data.get("funder", "")
-                    )
                     # Update progress
                     st.session_state.progress_steps[0]["status"] = "done"
                     st.session_state.progress_steps[1]["status"] = "done"
+                    st.rerun()
                 else:
                     st.error(f"Could not extract requirements: {tor_data.get('error', 'Unknown error')}")
             except Exception as e:
                 raise
 
+# ---------------------------------------------------------------------------
+# STEP 1.5 — ToR Review Panel
+# ---------------------------------------------------------------------------
+
+confirmed_tor_data = None
 if st.session_state.tor_data and "error" not in st.session_state.tor_data:
-    tor = st.session_state.tor_data
-    with st.expander("📋 Extracted ToR Summary", expanded=False):
-        st.write(f"**Title:** {tor.get('title', 'N/A')}")
-        st.write(f"**Funder:** {tor.get('funder', 'N/A')}")
-        st.write(f"**Geography:** {', '.join(tor.get('geography', []))}")
-        st.write(f"**Thematic Areas:** {', '.join(tor.get('thematic_areas', []))}")
-        st.write(f"**Confidence:** {tor.get('extraction_confidence', 'N/A')}")
+    confirmed_tor_data = render_tor_review(st.session_state.tor_data)
+    if confirmed_tor_data:
+        st.session_state.confirmed_tor_data = confirmed_tor_data
 
-# ---------------------------------------------------------------------------
-# STEP 2 — Filters (8.6)
-# ---------------------------------------------------------------------------
-
-st.subheader("Step 2: Select Filters and Options")
-
-from config import GEOGRAPHY_OPTIONS, THEMATIC_OPTIONS, FUNDER_OPTIONS
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    selected_geo = st.multiselect(
-        "Geography",
-        options=GEOGRAPHY_OPTIONS,
-        default=st.session_state.filters.get("geography", []),
-        key="filter_geography",
-    )
-    st.session_state.filters["geography"] = selected_geo
-
-with col2:
-    selected_thematic = st.multiselect(
-        "Thematic Areas",
-        options=THEMATIC_OPTIONS,
-        default=st.session_state.filters.get("thematic_areas", []),
-        key="filter_thematic",
-    )
-    st.session_state.filters["thematic_areas"] = selected_thematic
-
-with col3:
-    selected_funder = st.multiselect(
-        "Funder",
-        options=FUNDER_OPTIONS,
-        default=st.session_state.filters.get("funder", []),
-        key="filter_funder",
-    )
-    st.session_state.filters["funder"] = selected_funder
-
-output_language = st.radio(
-    "Output Language",
-    options=["English", "Spanish", "Match ToR"],
-    index=0,
-    horizontal=True,
-    key="output_language",
-)
+if st.session_state.get("confirmed_tor_data"):
+    confirmed_tor_data = st.session_state.confirmed_tor_data
 
 try:
     from draft_generator import ALL_SECTIONS
@@ -325,19 +219,61 @@ except Exception:
         "alignment_with_tor",
     ]
 
-sections_to_include = st.multiselect(
-    "Sections to Include",
-    options=ALL_SECTIONS,
-    default=ALL_SECTIONS,
-    key="sections_to_include",
-)
-st.session_state.sections = sections_to_include if sections_to_include else ALL_SECTIONS
+if confirmed_tor_data:
+    st.subheader("Step 2: Output Options")
 
-condensed_mode = st.checkbox(
-    "Generate condensed version (8-10 pages)",
-    value=False,
-    key="condensed_mode",
-)
+    output_language = st.radio(
+        "Output Language",
+        options=["English", "Spanish", "Match ToR"],
+        index=0,
+        horizontal=True,
+        key="output_language",
+    )
+
+    sections_to_include = st.multiselect(
+        "Sections to Include",
+        options=ALL_SECTIONS,
+        default=ALL_SECTIONS,
+        key="sections_to_include",
+    )
+    st.session_state.sections = sections_to_include if sections_to_include else ALL_SECTIONS
+
+    condensed_mode = st.checkbox(
+        "Generate condensed version (8-10 pages)",
+        value=False,
+        key="condensed_mode",
+    )
+else:
+    # Provide defaults so downstream code doesn't fail with NameError
+    output_language = "English"
+    sections_to_include = ALL_SECTIONS if 'ALL_SECTIONS' in dir() else []
+    condensed_mode = False
+
+# ---------------------------------------------------------------------------
+# STEP 2.5 — Discovery Panel
+# ---------------------------------------------------------------------------
+
+discovery_result = None
+if confirmed_tor_data:
+    if st.session_state.get("retrieved_chunks") is None:
+        with st.spinner("Searching capability library..."):
+            from capability_retriever import retrieve_chunks
+            retrieval_filters = {"geography": [], "thematic_areas": [], "funder": []}
+            retrieval_result = retrieve_chunks(
+                confirmed_tor_data,
+                retrieval_filters,
+            )
+            st.session_state.retrieved_chunks = retrieval_result.get("retrieved_chunks", [])
+    if st.session_state.retrieved_chunks:
+        discovery_result = render_discovery_panel(
+            st.session_state.retrieved_chunks,
+            confirmed_tor_data,
+            GEOGRAPHY_OPTIONS,
+            THEMATIC_OPTIONS,
+        )
+        # Auto-trigger generation when discovery confirms
+        if discovery_result is not None and not st.session_state.get("generated_draft"):
+            st.session_state["drp_trigger_generate"] = True
 
 # ---------------------------------------------------------------------------
 # STEP 3 — Generate (8.7 / 8.8 / 8.9)
@@ -348,14 +284,14 @@ st.subheader("Step 3: Generate Capability Statement")
 # Guard conditions
 can_generate = _can_generate(
     api_key_missing=api_key_missing,
-    tor_data=st.session_state.tor_data,
+    tor_data=confirmed_tor_data,
     doc_count=doc_count,
 )
 
 if api_key_missing:
     st.warning("Cannot generate: API key is missing.")
-if st.session_state.tor_data is None:
-    st.info("Please upload a ToR document first.")
+if confirmed_tor_data is None:
+    st.info("Please upload a ToR document and confirm your selections first.")
 if doc_count == 0:
     st.warning(
         "⚠️ The capability library is empty. "
@@ -368,7 +304,10 @@ generate_button = st.button(
     type="primary",
 )
 
-if generate_button and can_generate:
+if (generate_button and can_generate) or (
+    st.session_state.get("drp_trigger_generate") and not st.session_state.get("generated_draft")
+):
+    st.session_state["drp_trigger_generate"] = False
     # Reset progress
     for step in st.session_state.progress_steps:
         step["status"] = "pending"
@@ -381,18 +320,18 @@ if generate_button and can_generate:
         def update_progress(step_index, status):
             st.session_state.progress_steps[step_index]["status"] = status
 
-        # Step: Retrieve chunks
+        # Step: Use chunks from Discovery Panel
         update_progress(2, "active")
-        with st.spinner("Searching capability library..."):
-            from capability_retriever import retrieve_chunks
-            # TODO: re-enable after keyword detection fix
-            retrieval_filters = {"geography": [], "thematic_areas": [], "funder": []}
-            retrieval_result = retrieve_chunks(
-                st.session_state.tor_data,
-                retrieval_filters,
-            )
-            st.session_state.retrieved_chunks = retrieval_result.get("retrieved_chunks", [])
-            print('CHUNKS_DEBUG: retrieved', len(st.session_state.retrieved_chunks), 'chunks')
+        if discovery_result is not None:
+            chunks_to_use = discovery_result["selected_chunks"]
+            geo_priority = discovery_result["geo_priority"]
+            thematic_emphasis = discovery_result["thematic_emphasis"]
+        else:
+            chunks_to_use = st.session_state.retrieved_chunks or []
+            geo_priority = "equal"
+            thematic_emphasis = []
+        st.session_state.retrieved_chunks = chunks_to_use
+        st.session_state["last_chunks_used"] = chunks_to_use
         update_progress(2, "done")
 
         # Step: Generate draft
@@ -400,8 +339,8 @@ if generate_button and can_generate:
         with st.spinner("Generating capability statement draft..."):
             from draft_generator import generate_draft
             generated_draft = generate_draft(
-                st.session_state.tor_data,
-                st.session_state.retrieved_chunks,
+                confirmed_tor_data,
+                chunks_to_use,
                 sections_to_include=st.session_state.sections,
                 output_language=output_language,
             )
@@ -412,153 +351,9 @@ if generate_button and can_generate:
             print('COUNTRY_TABLE_SAMPLE:', st.session_state.generated_draft.get('sections', {}).get('country_table', [])[:2])
         update_progress(3, "done")
 
-        # Step: Format document
-        update_progress(4, "active")
-        with st.spinner("Formatting Word document..."):
-            from citation_tagger import tag_citations
-            from output_formatter import write_output
-
-            citation_result = tag_citations(
-                st.session_state.generated_draft.get("sections", {})
-            )
-
-            output_path = write_output(
-                st.session_state.generated_draft,
-                citation_result,
-                output_language=output_language,
-                sections_to_include=st.session_state.sections,
-            )
-
-            if output_path.startswith("ERROR:"):
-                st.error(f"Failed to create document: {output_path}")
-                st.stop()
-
-            st.session_state.output_file_path = output_path
-        update_progress(4, "done")
-
-        # Step: Condensed version (optional)
-        if condensed_mode:
-            update_progress(5, "active")
-            with st.spinner("Generating condensed version..."):
-                try:
-                    import anthropic as _anthropic
-                    import json as _json
-                    from datetime import datetime as _dt
-                    from draft_generator import _strip_markdown_fences as _strip_fences
-
-                    # Step 1 — Extract original country_table (never condense it)
-                    draft_sections = st.session_state.generated_draft.get("sections", {})
-                    original_country_table = draft_sections.get("country_table", [])
-
-                    # Build input text from all string sections
-                    section_order = [
-                        "opening_statement",
-                        "institutional_overview",
-                        "geographic_experience",
-                        "thematic_areas",
-                        "selected_project_experience",
-                        "alignment_with_tor",
-                    ]
-                    section_texts = []
-                    for key in section_order:
-                        val = draft_sections.get(key, "")
-                        if isinstance(val, str) and val.strip():
-                            section_texts.append(f"[SECTION:{key}]\n{val}")
-                    full_draft_text = "\n\n".join(section_texts)
-
-                    # Step 2 — Call Claude API
-                    _condensed_system = (
-                        "You are a professional document editor. "
-                        "Condense this capability statement to 8-10 pages. "
-                        "Rules: shorten geographic experience to two sentences per country; "
-                        "compress thematic areas to three bullet points per theme; "
-                        "keep the three strongest project cards with full detail; "
-                        "keep all citation tags in format REF:filename:page_N; "
-                        "never invent content; "
-                        "preserve past tense for completed and present tense with ongoing marker for active projects. "
-                        "Return a JSON object with these exact keys: opening_statement, institutional_overview, "
-                        "geographic_experience, thematic_areas, selected_project_experience, alignment_with_tor. "
-                        "Each value is the condensed text for that section."
-                    )
-
-                    _condensed_user = (
-                        "Condense the following capability statement sections. "
-                        "Each section is marked with [SECTION:key]. "
-                        "Return a JSON object with the same keys and condensed text values. "
-                        "Preserve all [REF:filename:page_N] citation tags.\n\n"
-                        f"{full_draft_text}"
-                    )
-
-                    _condensed_client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-                    _condensed_response = _condensed_client.messages.create(
-                        model="claude-sonnet-4-5",
-                        max_tokens=8000,
-                        system=_condensed_system,
-                        messages=[{"role": "user", "content": _condensed_user}],
-                    )
-                    condensed_raw = _condensed_response.content[0].text
-
-                    # Step 3 — Parse response using _strip_markdown_fences
-                    try:
-                        cleaned = _strip_fences(condensed_raw)
-                        condensed_sections = _json.loads(cleaned)
-                    except Exception:
-                        # Fallback: put entire response in opening_statement
-                        condensed_sections = {k: "" for k in section_order}
-                        condensed_sections["opening_statement"] = condensed_raw
-
-                    # Ensure all section keys exist
-                    for _k in section_order:
-                        if _k not in condensed_sections:
-                            condensed_sections[_k] = ""
-
-                    # Step 4 — Restore original country_table
-                    condensed_sections["country_table"] = original_country_table
-
-                    condensed_draft = {
-                        "sections": condensed_sections,
-                        "interpretation_log": [],
-                        "summary": st.session_state.generated_draft.get("summary", {}),
-                    }
-
-                    # Step 5 — Tag citations and write output
-                    from citation_tagger import tag_citations as _tag_citations
-                    from output_formatter import write_output as _write_output
-
-                    _condensed_citations = _tag_citations(condensed_sections)
-
-                    condensed_filename_ts = _dt.now().strftime("%Y-%m-%d_%H-%M")
-                    _condensed_out_dir = os.path.abspath(OUTPUT_PATH)
-                    os.makedirs(_condensed_out_dir, exist_ok=True)
-
-                    _condensed_result = _write_output(
-                        condensed_draft,
-                        _condensed_citations,
-                        output_language=output_language,
-                        sections_to_include=None,
-                        output_path=_condensed_out_dir,
-                    )
-
-                    # Rename to condensed filename
-                    if not _condensed_result.startswith("ERROR:"):
-                        condensed_out_path = os.path.join(
-                            _condensed_out_dir,
-                            f"GovRisk_CapabilityStatement_Condensed_{condensed_filename_ts}.docx",
-                        )
-                        import shutil as _shutil
-                        _shutil.move(_condensed_result, condensed_out_path)
-                        # Step 6 — Store absolute path
-                        st.session_state.condensed_file_path = os.path.abspath(condensed_out_path)
-                    else:
-                        st.error(f"Condensed formatting failed: {_condensed_result}")
-
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    st.error(f"Condensed generation failed: {e}")
-            update_progress(5, "done")
-
-        st.success("✅ Capability statement generated successfully!")
+        # Draft generated — hand off to review panel
+        st.session_state.approved_draft = None
+        st.rerun()
 
     except Exception as e:
         st.error(f"An unexpected error occurred: {e}")
@@ -579,63 +374,103 @@ if any(s["status"] != "pending" for s in st.session_state.progress_steps):
             st.markdown(f"⬜ {step['label']}")
 
 # ---------------------------------------------------------------------------
-# STEP 4 — Results and Download (8.10 / 8.11)
+# STEP 3.5 — Draft Review Panel
 # ---------------------------------------------------------------------------
 
-if st.session_state.generated_draft and st.session_state.output_file_path:
-    st.subheader("Step 4: Review and Download")
-
-    # Summary panel (8.10)
-    summary = st.session_state.generated_draft.get("summary", {})
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Sections", summary.get("sections_generated", 0))
-    col2.metric("Projects", summary.get("projects_referenced", 0))
-    col3.metric("Countries", summary.get("countries_covered", 0))
-    col4.metric("Documents", summary.get("documents_used", 0))
-    col5.metric("Confidence", summary.get("overall_confidence", "N/A"))
-
-    # Interpretation log (8.10)
-    interp_log = st.session_state.generated_draft.get("interpretation_log", [])
-    if interp_log:
-        with st.expander("📊 Interpretation Log", expanded=False):
-            for entry in interp_log:
-                confidence = entry.get("confidence", "LOW")
-                color = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(confidence, "⚪")
-                st.markdown(f"{color} **{entry.get('section', '')}**")
-                st.markdown(f"- Inference: {entry.get('inference_made', '')}")
-                st.markdown(f"- Source: {entry.get('source_used', '')}")
-                if entry.get("gap_flagged"):
-                    st.markdown(f"- ⚠️ Gap: {entry.get('gap_flagged')}")
-                st.markdown(f"- Confidence: {confidence}")
-                st.divider()
-
-    # Download button (8.11)
-    try:
-        with open(os.path.abspath(st.session_state.output_file_path), "rb") as f:
-            docx_bytes = f.read()
-
-        filename = os.path.basename(st.session_state.output_file_path)
-        st.download_button(
-            label="📥 Download Capability Statement (.docx)",
-            data=docx_bytes,
-            file_name=filename,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            type="primary",
-        )
-    except Exception as e:
-        st.error(f"Could not prepare download: {e}")
-
-    # Condensed download button (shown only if condensed version was generated)
-    if st.session_state.get("condensed_file_path"):
-        try:
-            with open(st.session_state.condensed_file_path, "rb") as f:
-                condensed_bytes = f.read()
-            condensed_filename = os.path.basename(st.session_state.condensed_file_path)
-            st.download_button(
-                label="📄 Download Condensed Version (.docx)",
-                data=condensed_bytes,
-                file_name=condensed_filename,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+if st.session_state.generated_draft and "error" not in st.session_state.generated_draft:
+    # Handle pending regeneration request from panel
+    if st.session_state.get("drp_regen_request"):
+        regen = st.session_state.drp_regen_request
+        with st.spinner(f"Regenerating {regen['section_id']}..."):
+            from draft_generator import generate_draft as _regen_draft
+            section_draft = _regen_draft(
+                confirmed_tor_data or st.session_state.get("confirmed_tor_data", {}),
+                st.session_state.get("last_chunks_used", []),
+                output_language=output_language if 'output_language' in dir() else "English",
+                feedback=regen.get("feedback", ""),
+                single_section=regen["section_id"],
             )
-        except Exception as e:
-            st.error(f"Could not prepare condensed download: {e}")
+            if "error" not in section_draft:
+                new_content = section_draft.get("sections", {}).get(
+                    regen["section_id"], regen.get("current_content", "")
+                )
+                st.session_state[f"drp_section_content_{regen['section_id']}"] = new_content
+                st.session_state[f"drp_section_approved_{regen['section_id']}"] = False
+            st.session_state.drp_regen_request = None
+            st.rerun()
+
+    # Render the draft review panel
+    panel_result = render_draft_review(
+        st.session_state.generated_draft,
+        confirmed_tor_data or st.session_state.get("confirmed_tor_data", {}),
+    )
+
+    if panel_result is None:
+        pass  # Panel still open — waiting for Mark
+    elif panel_result.get("action") == "regenerate_section":
+        st.session_state.drp_regen_request = panel_result
+        st.rerun()
+    else:
+        # Mark confirmed — approved_draft received
+        st.session_state.approved_draft = panel_result
+
+# ---------------------------------------------------------------------------
+# STEP 4 — Format and download (runs after approval)
+# ---------------------------------------------------------------------------
+
+if st.session_state.get("approved_draft"):
+    approved = st.session_state.approved_draft
+
+    with st.spinner("Formatting Word document..."):
+        from citation_tagger import tag_citations
+        from output_formatter import write_output
+
+        approved_sections = approved["sections"]
+        section_order = approved.get("section_order", list(approved_sections.keys()))
+
+        ordered_draft = {
+            "sections": {k: approved_sections[k] for k in section_order if k in approved_sections},
+            "interpretation_log": approved.get("interpretation_log", []),
+            "summary": approved.get("summary", {}),
+        }
+
+        citation_result = tag_citations(ordered_draft.get("sections", {}))
+
+        # Restore country_table from original list if available
+        original_ct = st.session_state.get("drp_country_table_original")
+        if original_ct is not None and isinstance(original_ct, list):
+            ordered_draft["sections"]["country_table"] = original_ct
+        elif "country_table" in ordered_draft["sections"]:
+            if isinstance(ordered_draft["sections"]["country_table"], str):
+                del ordered_draft["sections"]["country_table"]
+                section_order = [s for s in section_order
+                                 if s != "country_table"]
+
+        output_path = write_output(
+            ordered_draft,
+            citation_result,
+            output_language=output_language if 'output_language' in dir() else "English",
+            sections_to_include=section_order,
+            section_formats=approved.get("section_formats", {}),
+            output_path=os.path.abspath(OUTPUT_PATH),
+        )
+
+        if output_path.startswith("ERROR:"):
+            st.error(f"Failed to create document: {output_path}")
+        else:
+            st.session_state.output_file_path = output_path
+            st.success("✅ Capability statement ready for download.")
+
+            try:
+                with open(os.path.abspath(st.session_state.output_file_path), "rb") as f:
+                    docx_bytes = f.read()
+                filename = os.path.basename(st.session_state.output_file_path)
+                st.download_button(
+                    label="📥 Download Capability Statement (.docx)",
+                    data=docx_bytes,
+                    file_name=filename,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    type="primary",
+                )
+            except Exception as e:
+                st.error(f"Could not prepare download: {e}")

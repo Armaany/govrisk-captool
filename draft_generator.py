@@ -300,6 +300,8 @@ def generate_draft(
     retrieved_chunks: list,
     sections_to_include: list = None,
     output_language: str = "English",
+    feedback: str = "",
+    single_section: str = None,
 ) -> dict:
     """
     Generate a capability statement draft using the Claude API.
@@ -309,11 +311,28 @@ def generate_draft(
         retrieved_chunks:   List of chunk dicts from capability_retriever.
         sections_to_include: List of section names to include; None = all sections.
         output_language:    "English" | "Spanish" | "Match ToR"
+        feedback:           Mark's instruction for how to adjust (optional).
+        single_section:     If set, regenerate only this one section_id.
 
     Returns:
         GeneratedDraft dict, or error-state dict on failure.
         Never raises exceptions.
     """
+    # Cap chunks to MAX_GENERATION_CHUNKS
+    from config import MAX_GENERATION_CHUNKS
+    if len(retrieved_chunks) > MAX_GENERATION_CHUNKS:
+        retrieved_chunks = sorted(
+            retrieved_chunks,
+            key=lambda c: c.get("relevance_score", 0),
+            reverse=True,
+        )[:MAX_GENERATION_CHUNKS]
+
+    # Handle single_section mode
+    if single_section:
+        if single_section not in ALL_SECTIONS:
+            return _error_state(f"Unknown section: {single_section}")
+        sections_to_include = [single_section]
+
     # Build prompt components
     try:
         tor_summary = _build_tor_summary(tor_data)
@@ -322,11 +341,19 @@ def generate_draft(
         )
         formatted_chunks = _build_context_block(retrieved_chunks)
 
+        # Feedback instruction — prepended when Mark provides guidance
+        feedback_block = ""
+        if feedback and feedback.strip():
+            feedback_block = (
+                f"\n\nMARK'S INSTRUCTION FOR THIS SECTION:\n{feedback.strip()}\n"
+                "Apply this instruction when writing the section below.\n"
+            )
+
         user_prompt = _USER_PROMPT_TEMPLATE.format(
             tor_summary=tor_summary,
             sections_list=sections_list,
             language=output_language,
-            formatted_chunks=formatted_chunks,
+            formatted_chunks=feedback_block + formatted_chunks,
             json_schema=_JSON_SCHEMA,
         )
     except Exception as exc:

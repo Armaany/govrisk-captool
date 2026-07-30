@@ -183,6 +183,43 @@ def _add_citations_section(doc, citation_result):
                 _add_citation_line(doc, citation_text)
 
 
+def _add_bullet_list(doc, text):
+    """Render text as a bullet list in the document."""
+    if not text or not text.strip():
+        return
+    lines = text.split('\n')
+    for line in lines:
+        line = _REF_STRIP_PATTERN.sub('', line).strip()
+        line = _sanitize(line)
+        if not line:
+            continue
+        if line.startswith(('•', '-', '*')):
+            line = line.lstrip('•-* ').strip()
+            try:
+                para = doc.add_paragraph(style='List Bullet')
+            except Exception:
+                para = doc.add_paragraph()
+            run = para.add_run(line)
+            run.font.name = FONT_NAME
+            run.font.size = Pt(BODY_SIZE)
+        else:
+            _add_body_text(doc, line)
+
+
+def _add_project_cards(doc, text):
+    """Render text as project card blocks separated by horizontal rules."""
+    if not text or not text.strip():
+        return
+    blocks = text.split('\n\n')
+    for block in blocks:
+        block = _REF_STRIP_PATTERN.sub('', block).strip()
+        block = _sanitize(block)
+        if not block:
+            continue
+        _add_horizontal_rule(doc)
+        _add_body_text(doc, block)
+
+
 # ---------------------------------------------------------------------------
 # Public interface
 # ---------------------------------------------------------------------------
@@ -192,6 +229,7 @@ def write_output(
     citation_result,
     output_language="English",
     sections_to_include=None,
+    section_formats=None,
     output_path=None,
 ):
     """
@@ -212,6 +250,8 @@ def write_output(
     try:
         from config import OUTPUT_PATH
 
+        section_formats = section_formats or {}
+
         if output_path is None:
             output_path = OUTPUT_PATH
 
@@ -231,25 +271,48 @@ def write_output(
             sec.left_margin = Cm(2.5)
             sec.right_margin = Cm(2.5)
 
-        # Section order as specified in SPEC.md §5.7
+        # Section order — respects sections_to_include order
+        _DISPLAY_NAMES = {
+            "opening_statement":            "Opening Statement",
+            "institutional_overview":       "Institutional Overview",
+            "country_table":                "Country Experience",
+            "geographic_experience":        "Geographic Experience",
+            "thematic_areas":               "Thematic Areas",
+            "selected_project_experience":  "Selected Project Experience",
+            "alignment_with_tor":           "Alignment with ToR",
+        }
+
+        _DEFAULT_ORDER = [
+            "opening_statement",
+            "institutional_overview",
+            "country_table",
+            "geographic_experience",
+            "thematic_areas",
+            "selected_project_experience",
+            "alignment_with_tor",
+        ]
+
+        ordered_keys = sections_to_include if sections_to_include else _DEFAULT_ORDER
         section_map = [
-            ("Opening Statement", "opening_statement"),
-            ("Institutional Overview", "institutional_overview"),
-            ("Country Experience", "country_table"),
-            ("Geographic Experience", "geographic_experience"),
-            ("Thematic Areas", "thematic_areas"),
-            ("Selected Project Experience", "selected_project_experience"),
-            ("Alignment with ToR", "alignment_with_tor"),
+            (_DISPLAY_NAMES.get(k, k.replace("_", " ").title()), k)
+            for k in ordered_keys
         ]
 
         for heading_text, section_key in section_map:
-            if sections_to_include and section_key not in sections_to_include:
-                continue
+            format_choice = section_formats.get(section_key, "Narrative")
 
             _add_heading(doc, heading_text)
 
             if section_key == "country_table":
-                _add_country_table(doc, sections.get("country_table", []))
+                ct = sections.get("country_table")
+                if isinstance(ct, list) and ct:
+                    _add_country_table(doc, ct)
+                elif isinstance(ct, str) and ct.strip():
+                    _add_body_text(doc, ct)
+            elif format_choice == "Bullet list":
+                _add_bullet_list(doc, sections.get(section_key, ""))
+            elif format_choice == "Project cards":
+                _add_project_cards(doc, sections.get(section_key, ""))
             else:
                 _add_body_text(doc, sections.get(section_key, ""))
 

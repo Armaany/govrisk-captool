@@ -15,7 +15,7 @@ def test_chunk_overlap_tokens():
     assert config.CHUNK_OVERLAP_TOKENS == 50
 
 def test_max_retrieval_results():
-    assert config.MAX_RETRIEVAL_RESULTS == 20
+    assert config.MAX_RETRIEVAL_RESULTS == 50
 
 def test_geography_options_count():
     assert len(config.GEOGRAPHY_OPTIONS) == 9
@@ -51,3 +51,9 @@ def test_paths_defined():
     assert config.CAPABILITY_LIBRARY_PATH == "./capability_library/"
     assert config.CHROMA_DB_PATH == "./chroma_db/"
     assert config.OUTPUT_PATH == "./output/"
+
+
+def test_max_generation_chunks_defined():
+    from config import MAX_GENERATION_CHUNKS
+    assert isinstance(MAX_GENERATION_CHUNKS, int)
+    assert MAX_GENERATION_CHUNKS > 0

@@ -29,27 +29,43 @@ class ExtractionError(Exception):
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = (
-    "You are a structured data extractor for a consulting firm.\n"
-    "Extract information from Terms of Reference documents.\n"
-    "Respond ONLY with valid JSON matching the schema provided.\n"
-    "Do not include any explanation, preamble, or markdown formatting."
+    "You are analyzing a Terms of Reference or Notice of Funding Opportunity document. "
+    "Extract structured information accurately.\n"
+    "Use the document's own language — do not normalize, generalize, or substitute terms. "
+    "If a term appears explicitly in the document, use it exactly as written.\n"
+    "Return ONLY valid JSON. No markdown fences. No explanation."
 )
 
 USER_PROMPT_TEMPLATE = (
-    "Extract structured requirements from the following Terms of Reference document.\n"
-    "Return ONLY this JSON structure:\n"
-    "{{\n"
-    '    "title": "full title of the opportunity",\n'
-    '    "funder": "funding organization name",\n'
-    '    "geography": ["list of countries or regions mentioned"],\n'
-    '    "thematic_areas": ["list of technical areas required"],\n'
-    '    "key_requirements": ["list of key capability requirements, max 10"],\n'
-    '    "evaluation_criteria": ["list of evaluation criteria if mentioned"],\n'
-    '    "language": "English or Spanish",\n'
-    '    "source_file": "filename",\n'
-    '    "extraction_confidence": "HIGH or MEDIUM or LOW"\n'
-    "}}\n\n"
-    "ToR text:\n"
+    "Analyze this document and return a JSON object with these fields:\n\n"
+    '"title": The title or name of the opportunity. String.\n'
+    '"funder": The organization or government body funding this. '
+    "Use exact name as written. String.\n"
+    '"geography": List of countries or regions that are the TARGET or PRIORITY of this '
+    "opportunity. Use names exactly as written in the document. Do not include countries "
+    "mentioned only as context or comparisons. List of strings.\n"
+    '"thematic_areas": List of themes, technical areas, or subject areas that this '
+    "opportunity is about. Use the document's own terms — do not translate or generalize "
+    "(e.g. if the doc says \"Financial Intelligence\" keep that, do not replace with "
+    "\"AML\"). List of strings.\n"
+    '"key_requirements": List of what the responding organization must demonstrate, '
+    "deliver, or possess. Each item is one requirement. List of strings. Maximum 8 items.\n"
+    '"evaluation_criteria": List of how responses will be evaluated. List of strings. '
+    "Maximum 5 items. Empty list if not stated.\n"
+    '"language": "English" or "Spanish".\n'
+    '"extraction_confidence": "HIGH" if you found all main fields clearly stated. '
+    '"MEDIUM" if some fields required inference. '
+    '"LOW" if significant information was missing or ambiguous.\n'
+    '"paragraphs": List of all paragraphs from the document in order. Each paragraph is '
+    "a string. Exclude empty paragraphs and paragraphs under 20 characters. "
+    "Maximum 80 paragraphs.\n"
+    '"source_map": For each item in geography, thematic_areas, funder, and '
+    "key_requirements, return the paragraph index (0-based position in your paragraphs "
+    "list) and a short snippet (max 25 words) from that paragraph that contains the item. "
+    'Structure: {{"geography": [{{"term": ..., "paragraph_index": ..., "snippet": ...}}], '
+    '"thematic_areas": [...], "funder": [...], "key_requirements": [...]}} '
+    "If the paragraph cannot be identified, use paragraph_index: -1 and snippet: \"\".\n\n"
+    "DOCUMENT TEXT:\n"
     "{tor_text}"
 )
 
@@ -64,6 +80,13 @@ _REQUIRED_KEYS = {
     "language": "English",
     "source_file": "",
     "extraction_confidence": "LOW",
+    "paragraphs": [],
+    "source_map": {
+        "geography": [],
+        "thematic_areas": [],
+        "funder": [],
+        "key_requirements": [],
+    },
 }
 
 
@@ -137,7 +160,7 @@ def _call_claude(client: anthropic.Anthropic, user_prompt: str) -> str:
     """Make a single Claude API call and return the raw text response."""
     response = client.messages.create(
         model=MODEL_NAME,
-        max_tokens=1000,
+        max_tokens=8000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
@@ -161,7 +184,16 @@ def _fill_defaults(data: dict, filename: str) -> dict:
     """
     for key, default in _REQUIRED_KEYS.items():
         if key not in data:
-            data[key] = default
+            # Use a fresh copy for mutable defaults
+            data[key] = default.copy() if isinstance(default, (dict, list)) else default
+    # Ensure source_map has all four sub-keys
+    sm = data.get("source_map", {})
+    if not isinstance(sm, dict):
+        sm = {}
+    for sub_key in ("geography", "thematic_areas", "funder", "key_requirements"):
+        if sub_key not in sm:
+            sm[sub_key] = []
+    data["source_map"] = sm
     # Always override source_file with the actual filename
     data["source_file"] = filename
     return data

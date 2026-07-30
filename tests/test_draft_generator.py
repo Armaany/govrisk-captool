@@ -389,3 +389,91 @@ def test_p23_context_block_chunk_cap(num_chunks):
     # Count how many [Source: ...] headers appear — each represents one chunk
     source_headers = re.findall(r'\[Source:', context)
     assert len(source_headers) <= 20
+
+
+# ---------------------------------------------------------------------------
+# Component 5 — feedback and single_section tests
+# ---------------------------------------------------------------------------
+
+def test_feedback_parameter_accepted():
+    """generate_draft accepts feedback parameter without TypeError."""
+    tor_data = _make_tor_data()
+    chunks = _make_chunks()
+    mock_client = _make_mock_client(_make_valid_draft_json())
+    with patch("draft_generator.anthropic.Anthropic", return_value=mock_client):
+        result = generate_draft(tor_data, chunks, feedback="Make it shorter")
+    assert isinstance(result, dict)
+    assert "error" not in result
+
+
+def test_single_section_returns_only_that_section():
+    """single_section returns only the requested section."""
+    valid_json = json.dumps({
+        "sections": {"opening_statement": "Content here. [REF:doc.pdf:page_1]"},
+        "interpretation_log": [],
+        "summary": {},
+    })
+    mock_client = _make_mock_client(valid_json)
+    with patch("draft_generator.anthropic.Anthropic", return_value=mock_client):
+        result = generate_draft(
+            _make_tor_data(), _make_chunks(), single_section="opening_statement"
+        )
+    assert "opening_statement" in result["sections"]
+
+
+def test_single_section_unknown_returns_error():
+    """Unknown single_section returns error dict."""
+    result = generate_draft(
+        _make_tor_data(), _make_chunks(), single_section="nonexistent_section"
+    )
+    assert "error" in result
+
+
+def test_feedback_appears_in_prompt():
+    """feedback text appears in the prompt sent to Claude."""
+    tor_data = _make_tor_data()
+    chunks = _make_chunks()
+    captured = {}
+
+    def capture_call(**kwargs):
+        captured["messages"] = kwargs.get("messages", [])
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=_make_valid_draft_json())]
+        return mock_response
+
+    mock_client = MagicMock()
+    mock_client.messages.create.side_effect = capture_call
+
+    with patch("draft_generator.anthropic.Anthropic", return_value=mock_client):
+        generate_draft(tor_data, chunks, feedback="Focus on FIU strengthening")
+
+    # Check the user message content contains the feedback
+    user_msg = captured["messages"][0]["content"]
+    assert "Focus on FIU strengthening" in user_msg
+
+
+def test_chunks_capped_at_max_generation_chunks():
+    from unittest.mock import patch, MagicMock
+    from config import MAX_GENERATION_CHUNKS
+
+    fake_chunks = [
+        {"chunk_id": str(i), "text": f"chunk {i}",
+         "relevance_score": 0.5, "source_file": f"file{i}.pdf",
+         "page_number": 1, "geography": [], "thematic_areas": []}
+        for i in range(MAX_GENERATION_CHUNKS + 10)
+    ]
+
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock(
+        text='{"sections":{"opening_statement":"test"},"interpretation_log":[],"summary":{}}'
+    )]
+
+    with patch("draft_generator.anthropic.Anthropic") as MockClient:
+        MockClient.return_value.messages.create.return_value = mock_response
+        from draft_generator import generate_draft
+        result = generate_draft(
+            {"title": "test", "geography": [], "thematic_areas": [],
+             "key_requirements": [], "funder": "", "language": "English"},
+            fake_chunks,
+        )
+    assert "error" not in result

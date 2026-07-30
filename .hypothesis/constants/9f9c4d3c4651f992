@@ -1,4 +1,0 @@
-# file: C:\Users\jage2\OneDrive\Desktop\ITenlace\2026\proposal-tool\proposal_tool\capability_indexer.py
-# hypothesis_version: 6.151.4
-
-[100, '(?<=[.!?])(?:\\s+|$)', '.docx', '.pdf', 'IndexingSummary', 'cell', 'chunk_index', 'chunk_text', 'country', 'detect_tags', 'doc_type', 'donor', 'geography', 'govrisk_capabilities', 'ids', 'index_library', 'p', 'page_number', 'para', 'pdf', 'project_name', 'source_file', 'tbl', 'text_content', 'thematic_areas', 'word', 'year', '}']

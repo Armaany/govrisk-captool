@@ -130,3 +130,184 @@ def test_download_only_after_generation():
     assert _should_show_download({"sections": {}}, None) is False
     assert _should_show_download(None, "/path/to/file.docx") is False
     assert _should_show_download({"sections": {}}, "/path/to/file.docx") is True
+
+
+# ---------------------------------------------------------------------------
+# Component 2 — Discovery Panel integration tests
+# ---------------------------------------------------------------------------
+
+def test_discovery_result_none_uses_all_chunks():
+    """
+    When discovery_result is None, chunks_to_use falls back to
+    retrieved_chunks from session state.
+    Assert: chunks_to_use equals the full retrieved list.
+    """
+    full_chunks = [
+        {"chunk_id": "c1", "text": "chunk one"},
+        {"chunk_id": "c2", "text": "chunk two"},
+        {"chunk_id": "c3", "text": "chunk three"},
+    ]
+    discovery_result = None
+    retrieved_chunks = full_chunks
+
+    # Replicate the logic from app.py
+    if discovery_result is not None:
+        chunks_to_use = discovery_result["selected_chunks"]
+    else:
+        chunks_to_use = retrieved_chunks or []
+
+    assert chunks_to_use == full_chunks
+
+
+def test_discovery_result_filters_chunks():
+    """
+    When discovery_result is provided with a selected_chunks subset,
+    chunks_to_use equals only the selected subset.
+    Assert: len(chunks_to_use) < len(full_retrieved_chunks)
+    """
+    full_chunks = [
+        {"chunk_id": "c1", "text": "chunk one"},
+        {"chunk_id": "c2", "text": "chunk two"},
+        {"chunk_id": "c3", "text": "chunk three"},
+    ]
+    # Simulate user selecting only 1 of 3 chunks in the discovery panel
+    discovery_result = {
+        "selected_chunks": [full_chunks[0]],
+        "selected_projects": [],
+        "geo_priority": "equal",
+        "thematic_emphasis": [],
+        "prompt_txt_content": "",
+    }
+
+    # Replicate the logic from app.py
+    if discovery_result is not None:
+        chunks_to_use = discovery_result["selected_chunks"]
+    else:
+        chunks_to_use = full_chunks or []
+
+    assert len(chunks_to_use) < len(full_chunks)
+    assert len(chunks_to_use) == 1
+    assert chunks_to_use[0]["chunk_id"] == "c1"
+def test_normalize_functions_removed():
+    import app
+    assert not hasattr(app, "_GEO_NORMALIZE")
+    assert not hasattr(app, "_normalize_filter_values")
+    assert not hasattr(app, "_normalize_funder")
+
+
+def test_tor_review_panel_imported():
+    import app
+    assert hasattr(app, "render_tor_review")
+
+
+def test_confirmed_tor_data_in_defaults():
+    import app
+    assert "confirmed_tor_data" in app.DEFAULTS
+    assert app.DEFAULTS["confirmed_tor_data"] is None
+
+
+def test_can_generate_with_confirmed_tor_data():
+    from app import _can_generate
+    assert _can_generate(
+        api_key_missing=False,
+        tor_data={"title": "test"},
+        doc_count=5
+    ) is True
+
+
+# ---------------------------------------------------------------------------
+# Component 3c — tor_review_panel integration tests
+# ---------------------------------------------------------------------------
+
+def test_normalize_functions_removed():
+    """Normalization dicts and functions removed in v1.3."""
+    import ast
+    app_path = os.path.join(os.path.dirname(__file__), "..", "app.py")
+    with open(app_path, encoding="utf-8") as f:
+        source = f.read()
+    tree = ast.parse(source)
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    assigned = {node.targets[0].id for node in ast.walk(tree)
+                if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)}
+    assert "_GEO_NORMALIZE" not in assigned, "_GEO_NORMALIZE still defined in app.py"
+    assert "_normalize_filter_values" not in {
+        node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+    }, "_normalize_filter_values still defined in app.py"
+    assert "_normalize_funder" not in {
+        node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+    }, "_normalize_funder still defined in app.py"
+
+
+def test_tor_review_panel_imported():
+    """render_tor_review is imported into app.py."""
+    import ast
+    app_path = os.path.join(os.path.dirname(__file__), "..", "app.py")
+    with open(app_path, encoding="utf-8") as f:
+        source = f.read()
+    assert "render_tor_review" in source, "render_tor_review not imported in app.py"
+
+
+def test_confirmed_tor_data_in_defaults():
+    """DEFAULTS dict contains confirmed_tor_data key set to None."""
+    import ast
+    app_path = os.path.join(os.path.dirname(__file__), "..", "app.py")
+    with open(app_path, encoding="utf-8") as f:
+        source = f.read()
+    assert "confirmed_tor_data" in source, "confirmed_tor_data not found in app.py"
+    # Also verify via ast that DEFAULTS is a dict that includes it
+    assert '"confirmed_tor_data"' in source or "'confirmed_tor_data'" in source, \
+        "confirmed_tor_data key not in DEFAULTS"
+
+
+def test_can_generate_with_confirmed_tor_data():
+    """_can_generate returns True when all conditions met."""
+    from app import _can_generate
+    assert _can_generate(
+        api_key_missing=False,
+        tor_data={"title": "test"},
+        doc_count=5,
+    ) is True
+
+
+# ---------------------------------------------------------------------------
+# Component 4b — draft_review_panel integration tests
+# ---------------------------------------------------------------------------
+
+def test_draft_review_panel_imported():
+    """render_draft_review is imported into app.py."""
+    import ast
+    app_path = os.path.join(os.path.dirname(__file__), "..", "app.py")
+    with open(app_path, encoding="utf-8") as f:
+        source = f.read()
+    assert "render_draft_review" in source, "render_draft_review not imported in app.py"
+
+
+def test_approved_draft_in_defaults():
+    """DEFAULTS dict contains approved_draft key set to None."""
+    import ast
+    app_path = os.path.join(os.path.dirname(__file__), "..", "app.py")
+    with open(app_path, encoding="utf-8") as f:
+        source = f.read()
+    assert '"approved_draft"' in source or "'approved_draft'" in source
+
+
+def test_drp_regen_request_in_defaults():
+    """DEFAULTS dict contains drp_regen_request key set to None."""
+    import ast
+    app_path = os.path.join(os.path.dirname(__file__), "..", "app.py")
+    with open(app_path, encoding="utf-8") as f:
+        source = f.read()
+    assert '"drp_regen_request"' in source or "'drp_regen_request'" in source
+
+
+# ---------------------------------------------------------------------------
+# Component 6+7 — Fix sprint tests
+# ---------------------------------------------------------------------------
+
+def test_last_chunks_used_in_defaults():
+    """DEFAULTS dict contains last_chunks_used key set to []."""
+    import ast
+    app_path = os.path.join(os.path.dirname(__file__), "..", "app.py")
+    with open(app_path, encoding="utf-8") as f:
+        source = f.read()
+    assert '"last_chunks_used"' in source or "'last_chunks_used'" in source

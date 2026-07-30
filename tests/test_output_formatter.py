@@ -385,3 +385,74 @@ def test_p18_project_experience_order_preserved(tmp_path, project_texts):
         assert found == expected, (
             f"Entry {i} mismatch: expected '{expected}', got '{found}'"
         )
+
+
+def test_section_order_follows_sections_to_include():
+    from output_formatter import write_output
+    import tempfile, os
+    from docx import Document
+
+    draft = {
+        "sections": {
+            "opening_statement": "Opening text",
+            "thematic_areas": "Thematic text",
+            "alignment_with_tor": "Alignment text",
+        },
+        "interpretation_log": [],
+        "summary": {},
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = write_output(
+            draft, None,
+            sections_to_include=[
+                "alignment_with_tor",
+                "thematic_areas",
+                "opening_statement",
+            ],
+            output_path=tmpdir,
+        )
+    assert not path.startswith("ERROR:")
+
+
+def test_write_output_accepts_section_formats():
+    from output_formatter import write_output
+    import tempfile
+
+    draft = {
+        "sections": {"thematic_areas": "• Item one\n• Item two"},
+        "interpretation_log": [],
+        "summary": {},
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = write_output(
+            draft, None,
+            sections_to_include=["thematic_areas"],
+            section_formats={"thematic_areas": "Bullet list"},
+            output_path=tmpdir,
+        )
+    assert not path.startswith("ERROR:")
+
+
+def test_country_table_list_renders_without_error():
+    from output_formatter import write_output
+    import tempfile
+
+    ct = [{"country": "Mexico", "project_count": 2,
+           "year_range": "2024-2026",
+           "named_identifiers": ["PECEL"],
+           "donors": ["US State Dept"]}]
+    draft = {
+        "sections": {"country_table": ct},
+        "interpretation_log": [],
+        "summary": {},
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = write_output(
+            draft, None,
+            sections_to_include=["country_table"],
+            output_path=tmpdir,
+        )
+    assert not path.startswith("ERROR:")

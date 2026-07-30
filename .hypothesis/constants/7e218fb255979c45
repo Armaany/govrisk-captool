@@ -1,4 +1,0 @@
-# file: C:\Users\jage2\OneDrive\Desktop\ITenlace\2026\proposal-tool\proposal_tool\draft_generator.py
-# hypothesis_version: 6.151.4
-
-[-100, 16000, '\n\n---\n\n', 'English', 'HIGH', 'LAST100:', 'LOW', 'MEDIUM', 'RAW_LEN:', '\\[REF:([^:]+):', 'alignment_with_tor', 'confidence', 'content', 'countries_covered', 'country_table', 'documents_used', 'error', 'gap_flagged', 'inference_made', 'interpretation_log', 'opening_statement', 'overall_confidence', 'page_number', 'projects_referenced', 'role', 'section', 'sections', 'sections_generated', 'source_file', 'source_used', 'summary', 'text', 'thematic_areas', 'unknown', 'user', '{', '}']

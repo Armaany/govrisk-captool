@@ -215,10 +215,12 @@ def render_discovery_panel(
     n_projects = len(projects)
 
     # B. Project checklist
-    st.markdown(f"**Projects found: {n_projects}**")
+    st.markdown(f"**Documents found: {n_projects}**")
+    st.caption("Each document may contain multiple projects. "
+               "Select the documents whose content is most relevant.")
 
     if n_projects == 0:
-        st.info("No projects found. Please adjust your filters and retrieve again.")
+        st.info("No documents found. Please adjust your filters and retrieve again.")
         # Both buttons disabled — render them greyed out
         col1, col2 = st.columns(2)
         with col1:
@@ -266,38 +268,47 @@ def render_discovery_panel(
     st.markdown("---")
     left_col, right_col = st.columns(2)
 
-    geo_radio_options = ["Mexico first", "Regional / LATAM", "All equally weighted"]
-    geo_priority_map = {
-        "Mexico first": "exact",
-        "Regional / LATAM": "lac",
-        "All equally weighted": "equal",
-    }
+    # Geography priority defaults to confirmed geography from tor_data
+    confirmed_geos = tor_data.get("geography", [])
+    geo_priority_options = confirmed_geos + ["All equally weighted"]
+    if not confirmed_geos:
+        geo_priority_options = ["All equally weighted"]
 
     if "dp_geo_priority" not in st.session_state:
-        st.session_state["dp_geo_priority"] = "Mexico first"
+        st.session_state["dp_geo_priority"] = geo_priority_options[0]
 
     with left_col:
         geo_radio_val = st.radio(
             "Geography priority",
-            options=geo_radio_options,
-            index=geo_radio_options.index(st.session_state["dp_geo_priority"]),
+            options=geo_priority_options,
+            index=0,
             key="dp_geo_radio",
         )
         st.session_state["dp_geo_priority"] = geo_radio_val
 
+    # Thematic emphasis defaults to confirmed themes
+    confirmed_themes = tor_data.get("thematic_areas", [])
+    # Build combined options: confirmed themes first, then any
+    # fixed options not already in confirmed list
+    combined_options = list(confirmed_themes) + [t for t in thematic_options if t not in confirmed_themes]
+    if not combined_options:
+        combined_options = list(thematic_options)
+    # Default to all confirmed themes
+    default_themes = list(confirmed_themes) if confirmed_themes else list(thematic_options)
+
     if "dp_thematic_emphasis" not in st.session_state:
-        st.session_state["dp_thematic_emphasis"] = list(thematic_options)
+        st.session_state["dp_thematic_emphasis"] = default_themes
 
     with right_col:
         thematic_val = st.multiselect(
             "Thematic emphasis",
-            options=thematic_options,
+            options=combined_options,
             default=st.session_state["dp_thematic_emphasis"],
             key="dp_thematic_ms",
         )
         st.session_state["dp_thematic_emphasis"] = thematic_val
 
-    geo_priority = geo_priority_map.get(st.session_state["dp_geo_priority"], "equal")
+    geo_priority = st.session_state["dp_geo_priority"]
     thematic_emphasis = st.session_state["dp_thematic_emphasis"]
 
     # D. Evidence summary (live)
@@ -312,7 +323,7 @@ def render_discovery_panel(
 
     st.markdown("---")
     st.markdown(
-        f"**{n_selected} projects selected · {n_chunks} chunks included · "
+        f"**{n_selected} documents selected · {n_chunks} chunks included · "
         f"Priority: {st.session_state['dp_geo_priority']}**"
     )
     st.markdown(f"*{n_themes} themes emphasised*")
