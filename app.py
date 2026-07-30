@@ -106,7 +106,15 @@ with st.sidebar:
     except Exception:
         doc_count = 0
         st.metric("Documents indexed", 0)
-
+     # Auto-index on first run if library is empty
+    if doc_count == 0:
+        try:
+            from capability_indexer import index_library
+            with st.spinner("Building library index for first run..."):
+                index_library(force_reindex=False)
+            st.rerun()
+        except Exception as e:
+            st.warning(f"Auto-index failed: {e}")
     # Last indexed date from index_manifest.json
     try:
         import json
