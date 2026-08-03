@@ -154,6 +154,14 @@ with st.sidebar:
     st.caption(f"Output: {OUTPUT_PATH}")
     st.caption(f"Model: {MODEL_NAME}")
 
+    st.sidebar.markdown("---")
+st.sidebar.markdown("**🔍 Opportunity Monitor**")
+st.sidebar.link_button(
+    "View latest opportunities ↗",
+    "https://docs.google.com/spreadsheets/d/1vXqBDRHiHdyf8U4O_ZuIR5nOLQa-jgEphjuRCoctx14",
+)
+st.sidebar.caption("Updated daily · UNDP · World Bank · Grants.gov")
+
 # ---------------------------------------------------------------------------
 # Main content area
 # ---------------------------------------------------------------------------
