@@ -14,3 +14,6 @@ __pycache__/
 *.pyo
 .hypothesis/
 .pytest_cache/
+.env
+
+.env.template
