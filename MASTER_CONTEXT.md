@@ -57,7 +57,17 @@ STATUS: Functional but keywords too strict
 ISSUE: Only 1 result shown — June/July had zero results
 NEXT: Broaden keywords, show by week, show portals/filters used,
       add custom keywords, add trigger button in app
-
+### Tool 1 — Scraper file structure
+Location: C:\Users\jage2\OneDrive\Desktop\ITenlace\2026\govrisk-scraper
+Key files:
+  main.py        — entry point, runs all adapters
+  config.py      — keywords, filters, settings
+  portals/       — adapter per portal (undp, worldbank, grants)
+  engine/        — scraper core logic
+  store/         — Google Sheets writer
+  models.py      — data models
+  requirements.txt
+Run: cd govrisk-scraper && venv\Scripts\activate && python main.py
 ### Tool 2+3 — Capability Statement Generator
 STATUS: Working POC, deployed live
 PIPELINE: Step 1 upload → Step 1.5 ToR review → Step 2 options
