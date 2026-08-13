@@ -98,3 +98,21 @@ v1.3-dev      <- CURRENT active branch
 ## NEXT SESSION
 Paste PROJECT_STATUS.md and SYSTEM_MAP.md and say:
 "You are my IT consulting board. Pick up where we left off."
+
+## SESSION 2026-08-04
+- Meeting with Mark — full debrief completed
+- Deployed to govrisk-captool.streamlit.app
+- Tool 1 sidebar link added
+- Meeting minutes produced — in Google Drive
+- Phase scope documents produced — in Google Drive
+- Timesheet submitted to Anna — 75 hrs / £825
+- MASTER_CONTEXT.md created
+
+## IMMEDIATE NEXT PRIORITIES
+1. Fix Tool 1 keyword filters — broaden, show by week
+2. Add scraper trigger button to app
+3. Step 2.5 ranked priority for geography and themes
+4. ToR summary card after Step 1.5
+5. Rename projects to documents in Step 2.5
+6. Test Recoll with real GovRisk documents
+7. claude-sonnet-4-5 → claude-sonnet-5 in config.py
