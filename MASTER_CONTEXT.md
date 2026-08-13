@@ -68,6 +68,10 @@ Key files:
   models.py      — data models
   requirements.txt
 Run: cd govrisk-scraper && venv\Scripts\activate && python main.py
+### Tool 1 — Repository
+GitHub: https://github.com/Armaany/govrisk-scraper (private)
+Branch: main
+Committed: 2026-08-12
 ### Tool 2+3 — Capability Statement Generator
 STATUS: Working POC, deployed live
 PIPELINE: Step 1 upload → Step 1.5 ToR review → Step 2 options
