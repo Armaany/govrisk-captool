@@ -60,6 +60,17 @@ def test_empty_chromadb_guard_logic():
     assert _can_generate(api_key_missing=False, tor_data=None, doc_count=5) is False
 
 
+def test_empty_auto_index_does_not_trigger_reload_loop():
+    """An absent library must not cause Streamlit to rerun forever."""
+    from app import _index_created_content
+
+    assert _index_created_content({"chunks_created": 0}) is False
+    assert _index_created_content({"chunks_created": "0"}) is False
+    assert _index_created_content({}) is False
+    assert _index_created_content(None) is False
+    assert _index_created_content({"chunks_created": 4}) is True
+
+
 # ---------------------------------------------------------------------------
 # Test 4: no file uploaded guard
 # ---------------------------------------------------------------------------

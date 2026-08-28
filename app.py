@@ -29,6 +29,16 @@ def _can_generate(api_key_missing, tor_data, doc_count):
     return True
 
 
+def _index_created_content(summary):
+    """Return True only when an indexing attempt created usable chunks."""
+    if not isinstance(summary, dict):
+        return False
+    try:
+        return int(summary.get("chunks_created", 0)) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Imports
@@ -38,6 +48,7 @@ from config import GEOGRAPHY_OPTIONS, THEMATIC_OPTIONS, FUNDER_OPTIONS
 from discovery_panel import render_discovery_panel
 from tor_review_panel import render_tor_review
 from draft_review_panel import render_draft_review
+from opportunity_panel import render_opportunity_panel
 
 # ---------------------------------------------------------------------------
 # Session state initialisation (8.2)
@@ -55,6 +66,7 @@ DEFAULTS = {
     "drp_regen_request": None,
     "drp_trigger_generate": False,
     "last_chunks_used": [],
+    "selected_opportunity": None,
     "filters": {"geography": [], "thematic_areas": [], "funder": []},
     "sections": None,   # None = all sections
     "progress_steps": [
@@ -111,8 +123,14 @@ with st.sidebar:
         try:
             from capability_indexer import index_library
             with st.spinner("Building library index for first run..."):
-                index_library(force_reindex=False)
-            st.rerun()
+                auto_index_summary = index_library(force_reindex=False)
+            if _index_created_content(auto_index_summary):
+                st.rerun()
+            else:
+                st.warning(
+                    "Capability library is not available. Opportunity monitoring "
+                    "remains available; document generation is disabled."
+                )
         except Exception as e:
             st.warning(f"Auto-index failed: {e}")
     # Last indexed date from index_manifest.json
@@ -170,6 +188,15 @@ with st.sidebar:
 
 st.title("GovRisk Capability Statement Generator")
 st.markdown("Generate professional capability statements from your ToR and capability library.")
+
+with st.expander("Find an opportunity", expanded=True):
+    selected_opportunity = render_opportunity_panel()
+
+if selected_opportunity:
+    st.info(
+        "Preparing a capability statement for: "
+        + (selected_opportunity.get("opportunity_title") or "Untitled opportunity")
+    )
 
 # ---------------------------------------------------------------------------
 # STEP 1 — Upload ToR (8.5)
