@@ -15,11 +15,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 
 from opportunity_panel import (
+    clear_selected_opportunity,
     deduplicate_keywords,
     format_relevance,
+    get_selected_opportunity,
     parse_matched_keywords,
     parse_opportunities_csv,
     REQUIRED_HEADERS,
+    select_opportunity,
 )
 
 
@@ -87,6 +90,16 @@ def test_keyword_dedup_drops_blank_and_none():
 def test_keyword_dedup_empty_input():
     assert deduplicate_keywords([]) == []
     assert deduplicate_keywords(None) == []
+
+
+def test_aggregate_keyword_dedup_case_insensitive():
+    aggregate = [
+        "Corruption",
+        "corruption",
+        "CORRUPTION",
+        "anticorrupción",
+    ]
+    assert deduplicate_keywords(aggregate) == ["Corruption", "anticorrupción"]
 
 
 # ---------------------------------------------------------------------------
@@ -190,34 +203,25 @@ def test_clear_or_change_selection_control_present():
 # Selection and clear/change behaviour via session-state contract
 # ---------------------------------------------------------------------------
 
-def test_selection_and_clear_workflow_boundary():
-    """Simulate the selected-opportunity-to-upload boundary using a dict-backed
-    session state (as Streamlit provides), without a running server."""
-    import sys
-    from unittest.mock import MagicMock
-
-    st_mock = MagicMock()
+def test_selection_helpers_drive_real_session_state_contract():
+    """Exercise the helpers used by the real select and clear buttons."""
     session = {"selected_opportunity": None, "tor_data": None}
-    st_mock.session_state = session
 
-    # 1. Selecting an opportunity stores it in session state.
     opportunity = {"opportunity_title": "Justice reform", "opportunity_link": "https://x/1"}
-    session["selected_opportunity"] = opportunity
-    assert st_mock.session_state["selected_opportunity"]["opportunity_title"] == "Justice reform"
+    select_opportunity(session, opportunity)
+    assert get_selected_opportunity(session) == opportunity
 
-    # 2. The workflow boundary: selection is preserved and independent from the
-    #    ToR upload step (selecting does not populate tor_data).
-    assert st_mock.session_state["tor_data"] is None
+    # Selection intentionally does not populate or mutate the ToR upload state.
+    assert session["tor_data"] is None
 
-    # 3. Clearing the selection resets it without touching the upload state.
-    session["selected_opportunity"] = None
-    assert st_mock.session_state["selected_opportunity"] is None
-    assert st_mock.session_state["tor_data"] is None
+    clear_selected_opportunity(session)
+    assert get_selected_opportunity(session) is None
+    assert session["tor_data"] is None
 
-    # 4. Changing the selection replaces the stored opportunity.
     other = {"opportunity_title": "AML supervision", "opportunity_link": "https://x/2"}
-    session["selected_opportunity"] = other
-    assert st_mock.session_state["selected_opportunity"]["opportunity_title"] == "AML supervision"
+    select_opportunity(session, other)
+    assert get_selected_opportunity(session) == other
+    assert session["tor_data"] is None
 
 
 def test_selected_opportunity_is_a_session_default():

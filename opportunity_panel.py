@@ -162,6 +162,27 @@ def deduplicate_keywords(keywords) -> list[str]:
         result.append(text)
     return result
 
+SELECTED_OPPORTUNITY_KEY = "selected_opportunity"
+
+
+def select_opportunity(session_state, opportunity) -> None:
+    """Store the chosen opportunity in Streamlit session state.
+
+    Selecting an opportunity records it for capability-statement preparation.
+    It intentionally does not touch the ToR-upload state.
+    """
+    session_state[SELECTED_OPPORTUNITY_KEY] = opportunity
+
+
+def clear_selected_opportunity(session_state) -> None:
+    """Clear the selected opportunity, leaving unrelated state untouched."""
+    session_state[SELECTED_OPPORTUNITY_KEY] = None
+
+
+def get_selected_opportunity(session_state):
+    """Return the currently selected opportunity, or None."""
+    return session_state.get(SELECTED_OPPORTUNITY_KEY)
+
 
 def parse_opportunities_csv(csv_text: str) -> list[dict]:
     """Parse a header-name-driven Sheet export into defensive row records."""
@@ -333,7 +354,7 @@ def _render_card(opportunity: dict) -> None:
                 key=f"select_opportunity_{_record_key(opportunity)}",
                 use_container_width=True,
             ):
-                st.session_state["selected_opportunity"] = opportunity
+                select_opportunity(st.session_state, opportunity)
                 st.rerun()
 
 
@@ -373,13 +394,13 @@ def render_opportunity_panel() -> dict | None:
         opportunities = deduplicate_opportunities(fetch_opportunities())
     except OpportunitySchemaError as exc:
         st.error(str(exc))
-        return st.session_state.get("selected_opportunity")
+        return get_selected_opportunity(st.session_state)
     except Exception:
         st.error(
             "Opportunity results are temporarily unavailable. "
             "The capability-statement workflow remains available."
         )
-        return st.session_state.get("selected_opportunity")
+        return get_selected_opportunity(st.session_state)
 
     with status_col:
         st.metric("Opportunities available", len(opportunities))
@@ -387,12 +408,13 @@ def render_opportunity_panel() -> dict | None:
     if trigger_token and st.session_state.get("scan_requested"):
         st.info("Tool 1 is running. Refresh results in a few minutes.")
 
+    aggregate_keywords = [
+        keyword
+        for opportunity in opportunities
+        for keyword in opportunity.get("matched_keywords_list", [])
+    ]
     matched_terms = sorted(
-        {
-            keyword
-            for opportunity in opportunities
-            for keyword in opportunity.get("matched_keywords_list", [])
-        },
+        deduplicate_keywords(aggregate_keywords),
         key=str.casefold,
     )
     if matched_terms:
@@ -433,7 +455,7 @@ def render_opportunity_panel() -> dict | None:
                     with column:
                         _render_card(opportunity)
 
-    selected = st.session_state.get("selected_opportunity")
+    selected = get_selected_opportunity(st.session_state)
     if selected:
         title = selected.get("opportunity_title") or "Untitled opportunity"
         st.success(
@@ -441,6 +463,6 @@ def render_opportunity_panel() -> dict | None:
             "ToR, then upload it below to begin."
         )
         if st.button("Change or clear selection", key="clear_selected_opportunity"):
-            st.session_state["selected_opportunity"] = None
+            clear_selected_opportunity(st.session_state)
             st.rerun()
     return selected
