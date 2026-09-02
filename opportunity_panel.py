@@ -306,22 +306,24 @@ def render_opportunity_panel() -> dict | None:
     )
 
     trigger_token = get_trigger_token()
-    trigger_col, refresh_col, status_col = st.columns([1.4, 1, 2])
-    with trigger_col:
-        if st.button(
-            "Run opportunity scan",
-            type="primary",
-            disabled=not bool(trigger_token),
-            use_container_width=True,
-        ):
-            try:
-                dispatch_scraper(trigger_token)
-                st.session_state["scan_requested"] = True
-                st.success(
-                    "Scan started. Results will appear here when Tool 1 finishes."
-                )
-            except ScraperTriggerError as exc:
-                st.error(str(exc))
+    if trigger_token:
+        trigger_col, refresh_col, status_col = st.columns([1.4, 1, 2])
+        with trigger_col:
+            if st.button(
+                "Run opportunity scan",
+                type="primary",
+                use_container_width=True,
+            ):
+                try:
+                    dispatch_scraper(trigger_token)
+                    st.session_state["scan_requested"] = True
+                    st.success(
+                        "Scan started. Results will appear here when Tool 1 finishes."
+                    )
+                except ScraperTriggerError as exc:
+                    st.error(str(exc))
+    else:
+        refresh_col, status_col = st.columns([1, 3])
     with refresh_col:
         if st.button("Refresh results", use_container_width=True):
             _download_csv_text.clear()
@@ -342,12 +344,7 @@ def render_opportunity_panel() -> dict | None:
     with status_col:
         st.metric("Opportunities available", len(opportunities))
 
-    if not trigger_token:
-        st.caption(
-            "On-demand scanning will be enabled when the protected deployment "
-            "token is configured."
-        )
-    elif st.session_state.get("scan_requested"):
+    if trigger_token and st.session_state.get("scan_requested"):
         st.info("Tool 1 is running. Refresh results in a few minutes.")
 
     matched_terms = sorted(
