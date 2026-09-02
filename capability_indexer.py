@@ -14,6 +14,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import chromadb
 import pdfplumber
+
+from chroma_client import get_collection
 from docx import Document
 from typing import TypedDict, List, Tuple
 
@@ -214,11 +216,10 @@ def index_library(force_reindex: bool = False) -> IndexingSummary:
         IndexingSummary with documents_processed, chunks_created, documents_skipped.
     """
     library_path = os.path.abspath(CAPABILITY_LIBRARY_PATH)
-    chroma_path = os.path.abspath(CHROMA_DB_PATH)
 
-    # Connect to ChromaDB
-    client = chromadb.PersistentClient(path=chroma_path)
-    collection = client.get_or_create_collection("govrisk_capabilities")
+    # Connect to ChromaDB via the defensive shared factory (heals the
+    # misleading RustBindings error by falling back to a writable index dir).
+    collection = get_collection(CHROMA_DB_PATH)
 
     documents_processed = 0
     chunks_created = 0

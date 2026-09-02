@@ -106,18 +106,17 @@ if api_key_missing:
 with st.sidebar:
     st.header("Library Status")
 
-    # Query ChromaDB for document count
+    # Query ChromaDB for document count via the defensive shared factory.
+    from config import CHROMA_DB_PATH
     try:
-        import chromadb
-        from config import CHROMA_DB_PATH
-        chroma_path = os.path.abspath(CHROMA_DB_PATH)
-        client = chromadb.PersistentClient(path=chroma_path)
-        collection = client.get_or_create_collection("govrisk_capabilities")
+        from chroma_client import get_collection
+        collection = get_collection(CHROMA_DB_PATH)
         doc_count = collection.count()
         st.metric("Documents indexed", doc_count)
-    except Exception:
+    except Exception as e:
         doc_count = 0
         st.metric("Documents indexed", 0)
+        st.caption(f"Index unavailable: {type(e).__name__}")
      # Auto-index on first run if library is empty
     if doc_count == 0:
         try:
@@ -191,12 +190,6 @@ st.markdown("Generate professional capability statements from your ToR and capab
 
 with st.expander("Find an opportunity", expanded=True):
     selected_opportunity = render_opportunity_panel()
-
-if selected_opportunity:
-    st.info(
-        "Preparing a capability statement for: "
-        + (selected_opportunity.get("opportunity_title") or "Untitled opportunity")
-    )
 
 # ---------------------------------------------------------------------------
 # STEP 1 — Upload ToR (8.5)

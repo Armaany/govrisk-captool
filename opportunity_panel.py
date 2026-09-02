@@ -122,6 +122,47 @@ def _parse_score(value: str) -> float | None:
         return None
 
 
+def format_relevance(value: str) -> str:
+    """Display a relevance value accurately.
+
+    Fresh scraper records may carry qualitative labels (low/medium/high) or
+    numeric scores. Show qualitative labels verbatim (title-cased), numeric
+    values compactly, and degrade blank/malformed values to "Unavailable"
+    without crashing.
+    """
+    if value is None:
+        return "Unavailable"
+    text = str(value).strip()
+    if not text:
+        return "Unavailable"
+    numeric = _parse_score(text)
+    if numeric is not None:
+        return f"{numeric:g}"
+    return text[:1].upper() + text[1:]
+
+
+def deduplicate_keywords(keywords) -> list[str]:
+    """Deduplicate keywords case-insensitively, preserving the first readable
+    spelling (and accented characters). Blank/malformed items are dropped.
+    """
+    if not keywords:
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in keywords:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
 def parse_opportunities_csv(csv_text: str) -> list[dict]:
     """Parse a header-name-driven Sheet export into defensive row records."""
     rows = list(csv.reader(io.StringIO(csv_text)))
@@ -269,13 +310,12 @@ def _render_card(opportunity: dict) -> None:
 
         deadline = opportunity.get("deadline") or "Unavailable"
         recommendation = opportunity.get("bid_recommendation") or "Not assessed"
-        score = opportunity.get("relevance_score_number")
-        score_text = "Unavailable" if score is None else f"{score:g}"
+        score_text = format_relevance(opportunity.get("relevance_score"))
         st.caption(
             f"Deadline: {deadline} · Relevance: {score_text} · {recommendation}"
         )
 
-        keywords = opportunity.get("matched_keywords_list") or []
+        keywords = deduplicate_keywords(opportunity.get("matched_keywords_list"))
         st.caption("Why it matched")
         if keywords:
             st.write(" · ".join(keywords))
@@ -289,7 +329,7 @@ def _render_card(opportunity: dict) -> None:
                 st.link_button("Open opportunity ↗", link, use_container_width=True)
         with action_columns[1]:
             if st.button(
-                "Use this opportunity",
+                "Select for capability statement",
                 key=f"select_opportunity_{_record_key(opportunity)}",
                 use_container_width=True,
             ):
@@ -395,8 +435,12 @@ def render_opportunity_panel() -> dict | None:
 
     selected = st.session_state.get("selected_opportunity")
     if selected:
+        title = selected.get("opportunity_title") or "Untitled opportunity"
         st.success(
-            "Selected for capability-statement preparation: "
-            + (selected.get("opportunity_title") or "Untitled opportunity")
+            f"Opportunity selected: {title}. Open the opportunity, download the "
+            "ToR, then upload it below to begin."
         )
+        if st.button("Change or clear selection", key="clear_selected_opportunity"):
+            st.session_state["selected_opportunity"] = None
+            st.rerun()
     return selected

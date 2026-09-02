@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import chromadb
 
+from chroma_client import ChromaUnavailableError, get_client
 from config import CHROMA_DB_PATH, MAX_RETRIEVAL_RESULTS
 
 logging.basicConfig(level=logging.INFO)
@@ -153,12 +154,11 @@ def retrieve_chunks(
         "filters_applied": normalised_filters,
     }
 
-    # Connect to ChromaDB (Task 3.3)
-    chroma_path = os.path.abspath(CHROMA_DB_PATH)
+    # Connect to ChromaDB via the defensive shared factory (Task 3.3).
     try:
-        client = chromadb.PersistentClient(path=chroma_path)
-    except Exception as e:
-        logger.warning(f"Could not connect to ChromaDB at {chroma_path}: {e}")
+        client = get_client(CHROMA_DB_PATH)
+    except (ChromaUnavailableError, Exception) as e:
+        logger.warning(f"Could not connect to ChromaDB: {e}")
         return empty_result
 
     # Get or create collection — never crash if it doesn't exist yet
