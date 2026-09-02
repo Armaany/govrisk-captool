@@ -60,6 +60,31 @@ def test_empty_chromadb_guard_logic():
     assert _can_generate(api_key_missing=False, tor_data=None, doc_count=5) is False
 
 
+def test_library_search_failure_blocks_generation():
+    """An infrastructure failure must not generate without retrieved evidence."""
+    from app import _can_generate
+
+    assert _can_generate(
+        api_key_missing=False,
+        tor_data={"title": "test"},
+        doc_count=5,
+        retrieval_unavailable=True,
+    ) is False
+
+
+def test_library_warning_is_visible_only_for_infrastructure_failure():
+    from unittest.mock import MagicMock
+    from app import LIBRARY_UNAVAILABLE_MESSAGE, _show_library_unavailable_warning
+
+    ui = MagicMock()
+    assert _show_library_unavailable_warning(ui, True) is True
+    ui.warning.assert_called_once_with(LIBRARY_UNAVAILABLE_MESSAGE)
+
+    ui.reset_mock()
+    assert _show_library_unavailable_warning(ui, False) is False
+    ui.warning.assert_not_called()
+
+
 def test_empty_auto_index_does_not_trigger_reload_loop():
     """An absent library must not cause Streamlit to rerun forever."""
     from app import _index_created_content

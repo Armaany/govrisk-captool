@@ -14,6 +14,7 @@ from hypothesis import strategies as st
 import chromadb
 
 from capability_retriever import retrieve_chunks
+from chroma_client import ChromaUnavailableError
 from config import MAX_RETRIEVAL_RESULTS, GEOGRAPHY_OPTIONS
 
 
@@ -98,6 +99,30 @@ def test_empty_chromadb_returns_empty_result(tmp_path):
 
     assert result["retrieved_chunks"] == []
     assert result["total_chunks_retrieved"] == 0
+    assert result["library_unavailable"] is False
+
+
+def test_chroma_unavailable_is_distinct_from_healthy_empty_library():
+    error = ChromaUnavailableError("configured failed; recovery failed")
+    with patch("capability_retriever.get_client", side_effect=error):
+        result = retrieve_chunks({}, {})
+
+    assert result["retrieved_chunks"] == []
+    assert result["library_unavailable"] is True
+    assert "configured failed" in result["library_error"]
+
+
+def test_healthy_empty_collection_is_not_reported_unavailable():
+    client = type("Client", (), {})()
+    collection = type("Collection", (), {"count": lambda self: 0})()
+    client.get_or_create_collection = lambda _name: collection
+
+    with patch("capability_retriever.get_client", return_value=client):
+        result = retrieve_chunks({}, {})
+
+    assert result["retrieved_chunks"] == []
+    assert result["library_unavailable"] is False
+    assert "library_error" not in result
 
 
 # ---------------------------------------------------------------------------

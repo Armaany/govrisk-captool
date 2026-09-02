@@ -9,6 +9,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st
 
+LIBRARY_UNAVAILABLE_MESSAGE = (
+    "Capability-library search is temporarily unavailable. "
+    "Generation is paused until the library connection is restored."
+)
+
 # ---------------------------------------------------------------------------
 # Module-level helper functions (used by tests)
 # ---------------------------------------------------------------------------
@@ -18,13 +23,20 @@ def _api_key_is_missing(key):
     return not key or key.strip() == ""
 
 
-def _can_generate(api_key_missing, tor_data, doc_count):
+def _can_generate(
+    api_key_missing,
+    tor_data,
+    doc_count,
+    retrieval_unavailable=False,
+):
     """Return True only when all preconditions for generation are met."""
     if api_key_missing:
         return False
     if tor_data is None:
         return False
     if doc_count == 0:
+        return False
+    if retrieval_unavailable:
         return False
     return True
 
@@ -37,6 +49,14 @@ def _index_created_content(summary):
         return int(summary.get("chunks_created", 0)) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _show_library_unavailable_warning(ui, unavailable):
+    """Show the infrastructure warning only when library search failed."""
+    if not unavailable:
+        return False
+    ui.warning(LIBRARY_UNAVAILABLE_MESSAGE)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +78,7 @@ DEFAULTS = {
     "tor_data": None,
     "confirmed_tor_data": None,
     "retrieved_chunks": None,
+    "retrieval_unavailable": False,
     "generated_draft": None,
     "approved_draft": None,
     "output_file_path": None,
@@ -162,6 +183,8 @@ with st.sidebar:
                     f"{summary['chunks_created']} chunks. "
                     f"Skipped: {summary['documents_skipped']}."
                 )
+                st.session_state.retrieved_chunks = None
+                st.session_state.retrieval_unavailable = False
                 st.rerun()
             except Exception as e:
                 st.error(f"Failed to update library: {e}")
@@ -214,6 +237,7 @@ if uploaded_file is not None:
                 st.session_state.tor_data = tor_data
                 # Reset downstream state
                 st.session_state.retrieved_chunks = None
+                st.session_state.retrieval_unavailable = False
                 st.session_state.generated_draft = None
                 st.session_state.output_file_path = None
                 st.session_state.confirmed_tor_data = None
@@ -302,6 +326,14 @@ if confirmed_tor_data:
                 retrieval_filters,
             )
             st.session_state.retrieved_chunks = retrieval_result.get("retrieved_chunks", [])
+            st.session_state.retrieval_unavailable = bool(
+                retrieval_result.get("library_unavailable", False)
+            )
+    if st.session_state.get("retrieval_unavailable"):
+        _show_library_unavailable_warning(
+            st,
+            st.session_state.get("retrieval_unavailable", False),
+        )
     if st.session_state.retrieved_chunks:
         discovery_result = render_discovery_panel(
             st.session_state.retrieved_chunks,
@@ -324,6 +356,7 @@ can_generate = _can_generate(
     api_key_missing=api_key_missing,
     tor_data=confirmed_tor_data,
     doc_count=doc_count,
+    retrieval_unavailable=st.session_state.get("retrieval_unavailable", False),
 )
 
 if api_key_missing:

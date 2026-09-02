@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import chromadb
 
-from chroma_client import ChromaUnavailableError, get_client
+from chroma_client import get_client
 from config import CHROMA_DB_PATH, MAX_RETRIEVAL_RESULTS
 
 logging.basicConfig(level=logging.INFO)
@@ -152,28 +152,34 @@ def retrieve_chunks(
         "total_chunks_retrieved": 0,
         "documents_used": [],
         "filters_applied": normalised_filters,
+        "library_unavailable": False,
     }
+
+    def unavailable_result(stage: str, error: Exception) -> dict:
+        logger.warning("Capability-library %s failed: %s", stage, error)
+        return {
+            **empty_result,
+            "library_unavailable": True,
+            "library_error": str(error),
+        }
 
     # Connect to ChromaDB via the defensive shared factory (Task 3.3).
     try:
         client = get_client(CHROMA_DB_PATH)
-    except (ChromaUnavailableError, Exception) as e:
-        logger.warning(f"Could not connect to ChromaDB: {e}")
-        return empty_result
+    except Exception as e:
+        return unavailable_result("connection", e)
 
     # Get or create collection — never crash if it doesn't exist yet
     try:
         collection = client.get_or_create_collection("govrisk_capabilities")
     except Exception as e:
-        logger.warning(f"Could not get ChromaDB collection: {e}")
-        return empty_result
+        return unavailable_result("collection access", e)
 
     # Handle empty collection (Task 3.3 / Requirement 4.6)
     try:
         count = collection.count()
     except Exception as e:
-        logger.warning(f"Could not count ChromaDB collection: {e}")
-        return empty_result
+        return unavailable_result("collection count", e)
 
     if count == 0:
         return empty_result
@@ -193,8 +199,7 @@ def retrieve_chunks(
             include=["documents", "metadatas", "distances"],
         )
     except Exception as e:
-        logger.warning(f"ChromaDB query failed: {e}")
-        return empty_result
+        return unavailable_result("query", e)
 
     # Unpack results (ChromaDB returns lists-of-lists for batch queries)
     ids_list = query_result.get("ids", [[]])[0] or []
