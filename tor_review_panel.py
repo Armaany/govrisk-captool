@@ -25,6 +25,8 @@ import streamlit as st
 
 __all__ = [
     "render_tor_review",
+    "_build_tor_at_a_glance",
+    "_apply_review_state",
     "_build_paragraph_highlights",
     "_get_highlight_color",
     "_get_left_border_color",
@@ -59,7 +61,88 @@ _PRIORITY = ["geo", "funder", "theme", "req"]
 
 
 # ---------------------------------------------------------------------------
-# 1. _build_paragraph_highlights
+# 1. _build_tor_at_a_glance
+# ---------------------------------------------------------------------------
+
+def _build_tor_at_a_glance(tor_data: dict) -> dict:
+    """Build a defensive, source-grounded summary of extracted ToR fields.
+
+    This helper does not infer or generate new content. It only normalises the
+    structured values already returned by ``tor_extractor.extract_tor`` so the
+    user can review the inputs that will drive evidence retrieval and drafting.
+    """
+
+    def clean_text(value, fallback: str) -> str:
+        if value is None:
+            return fallback
+        text = str(value).strip()
+        return text or fallback
+
+    def clean_items(value) -> list:
+        if not isinstance(value, (list, tuple)):
+            return []
+        result = []
+        seen = set()
+        for item in value:
+            text = str(item).strip() if item is not None else ""
+            key = text.casefold()
+            if text and key not in seen:
+                seen.add(key)
+                result.append(text)
+        return result
+
+    geography = clean_items(tor_data.get("geography"))
+    thematic_areas = clean_items(tor_data.get("thematic_areas"))
+    key_requirements = clean_items(tor_data.get("key_requirements"))
+    evaluation_criteria = clean_items(tor_data.get("evaluation_criteria"))
+    funder = clean_text(tor_data.get("funder"), "Not identified")
+
+    confidence = clean_text(
+        tor_data.get("extraction_confidence"), "UNKNOWN"
+    ).upper()
+    if confidence not in {"HIGH", "MEDIUM", "LOW"}:
+        confidence = "UNKNOWN"
+
+    missing_fields = []
+    if funder == "Not identified":
+        missing_fields.append("funder")
+    if not geography:
+        missing_fields.append("geography")
+    if not thematic_areas:
+        missing_fields.append("thematic areas")
+    if not key_requirements:
+        missing_fields.append("key requirements")
+
+    return {
+        "title": clean_text(tor_data.get("title"), "Title not identified"),
+        "funder": funder,
+        "geography": geography,
+        "thematic_areas": thematic_areas,
+        "key_requirements": key_requirements,
+        "evaluation_criteria": evaluation_criteria,
+        "language": clean_text(tor_data.get("language"), "Not identified"),
+        "extraction_confidence": confidence,
+        "missing_fields": missing_fields,
+    }
+
+
+def _apply_review_state(tor_data: dict, review_state) -> dict:
+    """Return ToR data with the user's current review edits applied."""
+    current = dict(tor_data)
+    funders = review_state.get("trp_funder", [])
+    current["funder"] = funders[0] if funders else ""
+    current["geography"] = list(review_state.get("trp_geography", []))
+    current["thematic_areas"] = list(
+        review_state.get("trp_thematic_areas", [])
+    )
+    current["key_requirements"] = list(
+        review_state.get("trp_key_requirements", [])
+    )
+    return current
+
+
+# ---------------------------------------------------------------------------
+# 2. _build_paragraph_highlights
 # ---------------------------------------------------------------------------
 
 def _build_paragraph_highlights(tor_data: dict) -> list:
@@ -103,7 +186,7 @@ def _build_paragraph_highlights(tor_data: dict) -> list:
 
 
 # ---------------------------------------------------------------------------
-# 2. _get_highlight_color
+# 3. _get_highlight_color
 # ---------------------------------------------------------------------------
 
 def _get_highlight_color(highlight_types: list) -> str:
@@ -118,7 +201,7 @@ def _get_highlight_color(highlight_types: list) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 3. _get_left_border_color
+# 4. _get_left_border_color
 # ---------------------------------------------------------------------------
 
 def _get_left_border_color(highlight_types: list) -> str:
@@ -133,7 +216,7 @@ def _get_left_border_color(highlight_types: list) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 4. render_tor_review
+# 5. render_tor_review
 # ---------------------------------------------------------------------------
 
 def render_tor_review(tor_data: dict) -> "dict | None":
@@ -155,6 +238,78 @@ def render_tor_review(tor_data: dict) -> "dict | None":
         "Remove anything incorrect, add anything missed, then confirm to proceed."
     )
 
+    # Initialise session state before rendering the summary so it always
+    # reflects the user's current corrections after a Streamlit rerun.
+    if not st.session_state.get("trp_initialised"):
+        funder_val = tor_data.get("funder", "")
+        st.session_state["trp_geography"] = list(tor_data.get("geography", []))
+        st.session_state["trp_funder"] = [funder_val] if funder_val else []
+        st.session_state["trp_thematic_areas"] = list(tor_data.get("thematic_areas", []))
+        st.session_state["trp_key_requirements"] = list(tor_data.get("key_requirements", []))
+        st.session_state["trp_confirmed"] = False
+        st.session_state["trp_initialised"] = True
+
+    # Source-grounded summary shown before the detailed paragraph review.
+    summary = _build_tor_at_a_glance(
+        _apply_review_state(tor_data, st.session_state)
+    )
+    st.markdown("### ToR at a glance")
+    st.info(
+        "Why this matters: the confirmed geography, themes and requirements "
+        "control which GovRisk evidence is retrieved and how the capability "
+        "statement is framed. Check this summary before continuing."
+    )
+
+    st.markdown("**Opportunity**")
+    st.write(summary["title"])
+
+    summary_col_1, summary_col_2 = st.columns(2)
+    with summary_col_1:
+        st.markdown("**Funder**")
+        st.write(summary["funder"])
+        st.markdown("**Geography**")
+        st.write(", ".join(summary["geography"]) or "Not identified")
+    with summary_col_2:
+        st.markdown("**Language**")
+        st.write(summary["language"])
+        st.markdown("**Thematic areas**")
+        st.write(", ".join(summary["thematic_areas"]) or "Not identified")
+
+    st.markdown("**Key requirements**")
+    if summary["key_requirements"]:
+        for requirement in summary["key_requirements"]:
+            st.write(f"- {requirement}")
+    else:
+        st.write("Not identified")
+
+    if summary["evaluation_criteria"]:
+        with st.expander("Evaluation criteria identified in the ToR"):
+            for criterion in summary["evaluation_criteria"]:
+                st.write(f"- {criterion}")
+
+    confidence = summary["extraction_confidence"].title()
+    st.caption(
+        f"Extraction confidence: {confidence}. "
+        "This is an automated extraction and must be confirmed against the ToR."
+    )
+    if summary["missing_fields"]:
+        st.warning(
+            "Please check the original ToR: the following information was not "
+            f"identified automatically: {', '.join(summary['missing_fields'])}."
+        )
+
+    with st.expander("How the confirmed summary will be used"):
+        st.markdown(
+            "- **Funder** helps preserve the correct institutional context and terminology.\n"
+            "- **Geography** prioritises GovRisk experience from relevant countries or regions.\n"
+            "- **Thematic areas** guide the semantic search of the capability library.\n"
+            "- **Key requirements** identify the capabilities and evidence the draft must address.\n"
+            "- **Evaluation criteria**, when stated, show what evaluators are likely to score."
+        )
+
+    st.divider()
+    st.markdown("### Verify against the source text")
+
     # B. Legend row
     legend_html = (
         '<span style="display:inline-block; background:#E6F1FB; color:#0C447C; '
@@ -172,16 +327,6 @@ def render_tor_review(tor_data: dict) -> "dict | None":
     )
     st.markdown(legend_html, unsafe_allow_html=True)
     st.markdown("")
-
-    # Initialise session state (once per tor_data upload)
-    if not st.session_state.get("trp_initialised"):
-        funder_val = tor_data.get("funder", "")
-        st.session_state["trp_geography"] = list(tor_data.get("geography", []))
-        st.session_state["trp_funder"] = [funder_val] if funder_val else []
-        st.session_state["trp_thematic_areas"] = list(tor_data.get("thematic_areas", []))
-        st.session_state["trp_key_requirements"] = list(tor_data.get("key_requirements", []))
-        st.session_state["trp_confirmed"] = False
-        st.session_state["trp_initialised"] = True
 
     # C. Two-column layout
     left_col, right_col = st.columns([2, 1])

@@ -12,6 +12,8 @@ from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 
 from tor_review_panel import (
+    _build_tor_at_a_glance,
+    _apply_review_state,
     _build_paragraph_highlights,
     _get_highlight_color,
     _get_left_border_color,
@@ -64,6 +66,81 @@ def sample_tor_data():
 # ---------------------------------------------------------------------------
 # Unit tests
 # ---------------------------------------------------------------------------
+
+def test_tor_at_a_glance_uses_only_extracted_fields(sample_tor_data):
+    summary = _build_tor_at_a_glance(sample_tor_data)
+
+    assert summary == {
+        "title": "Test ToR",
+        "funder": "UK FCDO",
+        "geography": ["Brazil", "Colombia", "Peru"],
+        "thematic_areas": ["Financial Intelligence", "AML/CFT"],
+        "key_requirements": ["cross-border cooperation"],
+        "evaluation_criteria": [],
+        "language": "English",
+        "extraction_confidence": "HIGH",
+        "missing_fields": [],
+    }
+
+
+def test_tor_at_a_glance_deduplicates_without_losing_first_spelling(sample_tor_data):
+    sample_tor_data["thematic_areas"] = [
+        "Integridad",
+        "integridad",
+        "  Justicia  ",
+        "",
+        None,
+    ]
+
+    summary = _build_tor_at_a_glance(sample_tor_data)
+
+    assert summary["thematic_areas"] == ["Integridad", "Justicia"]
+
+
+def test_tor_at_a_glance_flags_missing_decision_fields():
+    summary = _build_tor_at_a_glance(
+        {
+            "title": "",
+            "funder": None,
+            "geography": "Mexico",
+            "thematic_areas": [],
+            "key_requirements": None,
+            "evaluation_criteria": "Quality",
+            "extraction_confidence": "unexpected",
+        }
+    )
+
+    assert summary["title"] == "Title not identified"
+    assert summary["funder"] == "Not identified"
+    assert summary["geography"] == []
+    assert summary["evaluation_criteria"] == []
+    assert summary["extraction_confidence"] == "UNKNOWN"
+    assert summary["missing_fields"] == [
+        "funder",
+        "geography",
+        "thematic areas",
+        "key requirements",
+    ]
+
+
+def test_tor_at_a_glance_reflects_current_review_edits(sample_tor_data):
+    review_state = {
+        "trp_funder": ["Inter-American Development Bank"],
+        "trp_geography": ["Mexico"],
+        "trp_thematic_areas": ["Asset Recovery"],
+        "trp_key_requirements": ["Demonstrate regional delivery experience"],
+    }
+
+    current = _apply_review_state(sample_tor_data, review_state)
+    summary = _build_tor_at_a_glance(current)
+
+    assert summary["funder"] == "Inter-American Development Bank"
+    assert summary["geography"] == ["Mexico"]
+    assert summary["thematic_areas"] == ["Asset Recovery"]
+    assert summary["key_requirements"] == [
+        "Demonstrate regional delivery experience"
+    ]
+    assert "Brazil" not in summary["geography"]
 
 def test_build_paragraph_highlights_count(sample_tor_data):
     """Assert: _build_paragraph_highlights returns 5 items (one per paragraph)."""
