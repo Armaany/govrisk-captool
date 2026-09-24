@@ -605,30 +605,31 @@ def test_changed_document_second_batch_failure_preserves_old_generation(tmp_path
     long_text = " ".join(f"revised sentence {i} about justice reform." for i in range(400))
     _make_docx(doc_path, [long_text])
 
-    real_add = _collection(chroma).add
     with patch("capability_indexer.CAPABILITY_LIBRARY_PATH", str(lib) + os.sep):
         with patch("capability_indexer.CHROMA_DB_PATH", str(chroma)):
             import capability_indexer as ci
             real_add_gen = ci._add_generation
 
-            def failing_add_generation(collection, ids, docs, metas, batch_size=100):
-                # Force multiple small batches so a mid-stream failure is exercised.
-                return real_add_gen(collection, ids, docs, metas, batch_size=2)
+            # Force tiny batches so a mid-stream failure is exercised; pass the
+            # upsert flag through unchanged.
+            def small_batch_add_generation(collection, ids, docs, metas, batch_size=100, upsert=False):
+                return real_add_gen(collection, ids, docs, metas, batch_size=2, upsert=upsert)
 
-            # Patch collection.add to fail on the 2nd batch.
             col2 = ci.get_collection(str(chroma))
+            real_add = col2.add
             with patch.object(col2, "add", side_effect=_first_batch_ok_second_fails(col2, real_add)):
                 with patch.object(ci, "get_collection", return_value=col2):
-                    with patch.object(ci, "_add_generation", side_effect=failing_add_generation):
+                    with patch.object(ci, "_add_generation", side_effect=small_batch_add_generation):
                         summary = ci.index_library(force_reindex=False)
 
     assert summary["documents_failed"] == 1
     fail = summary["failed_documents"][0]
     assert fail["category"] in ("write_error", "write_error_rollback_failed")
 
+    # Inspect STORED Chroma state (not just the summary): old generation is
+    # preserved exactly and no partial new generation remains.
     col = _collection(chroma)
     after = col.get(where={"source_file": "a.docx"})
-    # Old generation preserved exactly; no partial new generation left behind.
     assert set(after["ids"]) == before_ids
     assert list(after["documents"]) == before_docs
 
@@ -674,27 +675,130 @@ def test_removed_document_deletion_failure_is_partial_and_counted(tmp_path):
 
 # --- Blocker 4: index-configuration change forces reindex of unchanged bytes -
 
+def _fingerprints_for(collection, source_file):
+    """Return the set of config_fingerprint values stored for a document."""
+    got = collection.get(where={"source_file": source_file}, include=["metadatas"])
+    return {m.get("config_fingerprint") for m in (got.get("metadatas") or [])}
+
+
 def test_config_change_forces_reindex_of_unchanged_file(tmp_path):
     lib = tmp_path / "lib"
     lib.mkdir()
-    _make_docx(lib / "a.docx", ["Config fingerprint test about Brazil."])
+    # A long document so different chunk sizes produce different chunk counts.
+    long_text = " ".join(
+        f"sentence {i} about anti-corruption and asset recovery in Brazil." for i in range(300)
+    )
+    _make_docx(lib / "a.docx", [long_text])
     chroma = tmp_path / "chroma"
+
+    import capability_indexer as ci
+
+    # Baseline run under the current (default) configuration.
+    first = _run_index(lib, chroma)
+    assert first["documents_processed"] == 1
+
+    col = _collection(chroma)
+    old_ids = set(col.get(where={"source_file": "a.docx"})["ids"])
+    old_fingerprints = _fingerprints_for(col, "a.docx")
+    assert len(old_fingerprints) == 1
+    old_fp = next(iter(old_fingerprints))
+    old_chunk_count = len(old_ids)
+
+    # Second run with identical bytes and identical config -> unchanged, no write.
+    second = _run_index(lib, chroma)
+    assert second["documents_unchanged"] == 1
+    assert second["documents_processed"] == 0
+    assert set(_collection(chroma).get(where={"source_file": "a.docx"})["ids"]) == old_ids
+
+    # Change the effective index configuration (smaller chunk size) but NOT the
+    # bytes. The document must be re-indexed because the fingerprint differs.
+    with patch("capability_indexer.MAX_TOKENS_PER_CHUNK", 40):
+        new_fp = ci.index_config_fingerprint()
+        # (a) fingerprints differ.
+        assert new_fp != old_fp
+        third = _run_index(lib, chroma)
+        # Expected chunk count under the NEW chunking configuration, computed
+        # independently from the same extraction the indexer uses.
+        pages, doc_type, ok, _ = ci._extract_pages(str(lib / "a.docx"), "a.docx", ".docx")
+        assert ok
+        expected_ids, _, _ = ci._build_chunks_for_pages(
+            pages, doc_type, "a.docx", ci.compute_file_hash(str(lib / "a.docx"))
+        )
+        expected_new_count = len(expected_ids)
+
+    assert third["documents_unchanged"] == 0
+    assert third["documents_processed"] == 1
+
+    # Inspect STORED Chroma state, not just the summary.
+    col = _collection(chroma)
+    stored = col.get(where={"source_file": "a.docx"}, include=["metadatas"])
+    new_ids = set(stored["ids"])
+    new_fingerprints = {m.get("config_fingerprint") for m in stored["metadatas"]}
+
+    # (b) stored metadata contains ONLY the new fingerprint.
+    assert new_fingerprints == {new_fp}
+    # (c) old-generation ids are absent.
+    assert old_ids.isdisjoint(new_ids)
+    # (d) new ids differ from old ids.
+    assert new_ids != old_ids
+    # (e) resulting chunk count matches the new chunking configuration.
+    assert len(new_ids) == expected_new_count
+    # Sanity: the new chunk count actually differs from the old one.
+    assert expected_new_count != old_chunk_count
+
+    # (f) a subsequent run under the SAME new configuration is unchanged, no write.
+    with patch("capability_indexer.MAX_TOKENS_PER_CHUNK", 40):
+        fourth = _run_index(lib, chroma)
+    assert fourth["documents_unchanged"] == 1
+    assert fourth["documents_processed"] == 0
+    assert set(_collection(chroma).get(where={"source_file": "a.docx"})["ids"]) == new_ids
+
+
+def test_force_reindex_identical_bytes_and_config_preserves_evidence(tmp_path):
+    """force_reindex=True with identical bytes/config must succeed, keep evidence,
+    create no duplicate chunks, and leave stored metadata correct."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    long_text = " ".join(
+        f"sentence {i} about FIU strengthening in Peru." for i in range(120)
+    )
+    _make_docx(lib / "a.docx", [long_text])
+    chroma = tmp_path / "chroma"
+
+    import capability_indexer as ci
 
     first = _run_index(lib, chroma)
     assert first["documents_processed"] == 1
 
-    # Second run with identical bytes and identical config -> unchanged/skipped.
-    second = _run_index(lib, chroma)
-    assert second["documents_unchanged"] == 1
-    assert second["documents_processed"] == 0
+    col = _collection(chroma)
+    before = col.get(where={"source_file": "a.docx"}, include=["documents", "metadatas"])
+    before_ids = list(before["ids"])
+    before_id_set = set(before_ids)
+    before_docs = list(before["documents"])
+    before_fp = {m.get("config_fingerprint") for m in before["metadatas"]}
+    assert before_ids
 
-    # Now change the effective index configuration (chunk size) but NOT the file
-    # bytes. The document must be re-indexed because the fingerprint differs.
-    with patch("capability_indexer.MAX_TOKENS_PER_CHUNK", 123):
-        third = _run_index(lib, chroma)
+    # Force reindex with unchanged bytes AND unchanged configuration. Ids will be
+    # identical, so this must upsert (not silently no-op, not delete-then-add).
+    forced = _run_index(lib, chroma, force_reindex=True)
 
-    assert third["documents_unchanged"] == 0
-    assert third["documents_processed"] == 1
+    # It completed successfully (not a failure/partial state).
+    assert forced["status"] == "ready"
+    assert forced["documents_failed"] == 0
+
+    col = _collection(chroma)
+    after = col.get(where={"source_file": "a.docx"}, include=["documents", "metadatas"])
+    after_ids = list(after["ids"])
+
+    # No duplicate chunks (ids unique) and no evidence lost.
+    assert len(after_ids) == len(set(after_ids))
+    assert set(after_ids) == before_id_set
+    assert len(after_ids) == len(before_ids)
+    # Documents and fingerprint metadata remain correct.
+    assert sorted(after["documents"]) == sorted(before_docs)
+    assert {m.get("config_fingerprint") for m in after["metadatas"]} == before_fp
+    # The whole collection holds exactly this document's chunks (no orphans).
+    assert set(col.get()["ids"]) == set(after_ids)
 
 
 # --- Blocker 5: manifest publication failure does not report ready -----------

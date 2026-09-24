@@ -85,12 +85,25 @@ written for `library_unavailable`, `index_unavailable`, or
 Chunk IDs are generation-specific and deterministic:
 
 ```
-<relative_name>::<content_hash>::chunk::<ordinal>
+<relative_name>::<content_hash>::<config_fingerprint>::chunk::<ordinal>
 ```
 
-Because the content hash is part of the ID, a changed document produces an
-entirely new ID space (a new "generation") that is disjoint from the old one.
-This is what makes transaction-safe replacement possible.
+The generation identity is a function of BOTH the content hash and the
+index-configuration fingerprint. So either a content change OR a configuration
+change (chunk size, overlap, or engine version) yields an entirely new, disjoint
+ID space (a new "generation"). This is what makes transaction-safe replacement
+possible, and it prevents a configuration-only change from colliding with stale
+IDs that a plain `add()` might silently ignore.
+
+Replacement across generations adds the complete new generation first, verifies
+that every new ID is actually stored, and only then deletes the exact old-
+generation IDs (rollback preserves the old generation on any write failure).
+
+The one case where new and old IDs are identical is `force_reindex=True` with
+unchanged content AND unchanged configuration. Rather than rely on `add()`
+accepting duplicate IDs, the indexer **upserts** that same generation in place —
+refreshing the chunks without deleting valid evidence and without creating
+duplicates.
 
 ## SHA-256 incremental reconciliation
 

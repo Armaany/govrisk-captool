@@ -173,17 +173,23 @@ def index_config_fingerprint() -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def deterministic_chunk_id(relative_name: str, content_hash: str, index: int) -> str:
+def deterministic_chunk_id(relative_name: str, content_hash: str,
+                           config_fingerprint: str, index: int) -> str:
     """Return a generation-specific, deterministic chunk id.
 
     The id incorporates the normalized relative filename, the document's content
-    hash, and the chunk ordinal. Because the content hash is part of the id, a
-    changed document produces an entirely NEW id space (a new "generation"),
-    which is what makes transaction-safe replacement possible: new-generation
-    chunks can be added alongside the old ones and, on failure, deleted by their
-    exact ids without ever touching the old generation.
+    hash, the index-configuration fingerprint, and the chunk ordinal. Including
+    BOTH the content hash and the config fingerprint means the "generation" is a
+    function of (content, configuration): either a content change OR a
+    configuration change (chunk size, overlap, or engine version) yields a
+    genuinely NEW id space. That distinctness is what makes transaction-safe
+    replacement work — new-generation chunks are added alongside the old ones and
+    can be deleted by their exact ids on failure without touching the old
+    generation, and a config-only change cannot silently collide with stale ids.
     """
-    return "{}::{}::chunk::{:06d}".format(relative_name, content_hash, index)
+    return "{}::{}::{}::chunk::{:06d}".format(
+        relative_name, content_hash, config_fingerprint, index
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +317,7 @@ def _build_chunks_for_pages(page_texts, doc_type: str, relative_name: str, conte
             "content_hash": content_hash,
             "config_fingerprint": fingerprint,
         })
-        ids.append(deterministic_chunk_id(relative_name, content_hash, i))
+        ids.append(deterministic_chunk_id(relative_name, content_hash, fingerprint, i))
         documents_list.append(chunk_text_val)
     return ids, documents_list, metadatas
 
@@ -729,20 +735,37 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
                 indexed_relnames.add(rel)
             continue
 
-        # --- Transaction-safe replacement (blocker 1) ---------------------
-        # 1. Add the new generation first (its ids are content-hash specific and
-        #    disjoint from the old generation, unless bytes are unchanged but the
-        #    config changed — in which case ids collide and upsert is required).
-        # 2. If any batch fails, delete the new-generation ids added so far and
-        #    preserve the old generation entirely.
-        # 3. Only after every batch succeeds, delete the EXACT old ids (never a
-        #    broad source_file delete that could remove the new generation).
-        write_ok, added_ids, write_error = _add_generation(
-            collection, new_ids, docs_list, metadatas
-        )
+        # --- Transaction-safe replacement --------------------------------
+        # The generation identity is (content_hash, config_fingerprint). Because
+        # both are baked into every chunk id, the new ids are DISJOINT from the
+        # old ids whenever content OR configuration changed. Only when both are
+        # unchanged (force_reindex re-running the identical generation) do the
+        # ids collide exactly.
+        old_id_set = set(old_ids)
+        new_id_set = set(new_ids)
+        same_generation = previously_indexed and new_id_set == old_id_set
+
+        if same_generation:
+            # Identical ids: a plain add() may be silently ignored, so upsert to
+            # refresh the same-generation chunks in place. Never delete first, so
+            # valid evidence is never at risk and no duplicates can arise.
+            write_ok, written_ids, write_error = _add_generation(
+                collection, new_ids, docs_list, metadatas, upsert=True
+            )
+        else:
+            # Genuinely new, disjoint generation. Add it first; only after it is
+            # fully present do we delete the exact old ids. On failure, roll back
+            # exactly what was added and preserve the old generation.
+            write_ok, written_ids, write_error = _add_generation(
+                collection, new_ids, docs_list, metadatas, upsert=False
+            )
+
         if not write_ok:
             logger.warning("Failed to write new generation for %s: %s", rel, write_error)
-            rollback_ok = _rollback_added(collection, added_ids)
+            # Roll back only ids that did not already exist in the old generation
+            # (never delete surviving old-generation evidence).
+            rollback_targets = [cid for cid in written_ids if cid not in old_id_set]
+            rollback_ok = _rollback_added(collection, rollback_targets)
             category = "write_error" if rollback_ok else "write_error_rollback_failed"
             if not rollback_ok:
                 logger.error(
@@ -760,10 +783,32 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
                 indexed_relnames.add(rel)
             continue
 
-        # New generation is fully written; now remove exactly the old ids that
-        # are not part of the new generation (bytes-unchanged + config-changed
-        # produces identical ids, so exclude them from deletion).
-        stale_old_ids = [cid for cid in old_ids if cid not in set(new_ids)]
+        # Verify the complete new generation is actually stored before pruning
+        # the old one. This guards against a backend that silently drops writes:
+        # if any expected new id is missing, we do NOT delete the old generation.
+        stored_ids = set(_get_ids_for(collection, rel))
+        missing = new_id_set - stored_ids
+        if missing:
+            logger.error(
+                "New generation for %s is incomplete after write (%d missing); "
+                "preserving old generation.", rel, len(missing)
+            )
+            failed_documents.append({
+                "filename": rel, "category": "write_incomplete", "reason": "write_incomplete",
+            })
+            documents_inventory.append({
+                "filename": rel, "content_hash": content_hash, "file_size": file_size,
+                "chunk_count": _count_chunks_for(collection, rel),
+                "status": DOC_STATUS_FAILED, "failure_category": "write_incomplete",
+            })
+            if previously_indexed:
+                indexed_relnames.add(rel)
+            continue
+
+        # New generation is fully written and verified; now remove exactly the
+        # old ids that are not part of the new generation. For the identical
+        # (upserted) generation this list is empty, so nothing is deleted.
+        stale_old_ids = [cid for cid in old_ids if cid not in new_id_set]
         if stale_old_ids:
             try:
                 collection.delete(ids=stale_old_ids)
@@ -892,26 +937,41 @@ def _publish_manifest_or_flag(summary: dict, storage_mode: str, documents_invent
         summary["last_successful_index_at"] = None
 
 
-def _add_generation(collection, ids, documents_list, metadatas, batch_size: int = 100):
-    """Add a new generation batch-by-batch, tracking exactly what was added.
+def _add_generation(collection, ids, documents_list, metadatas, batch_size: int = 100,
+                    upsert: bool = False):
+    """Write a generation batch-by-batch, tracking exactly what was written.
 
-    Returns ``(ok, added_ids, error)``. ``added_ids`` lists the ids successfully
-    written so far (for precise rollback if a later batch fails).
+    Returns ``(ok, written_ids, error)``. ``written_ids`` lists the ids
+    successfully written so far (for precise rollback if a later batch fails).
+
+    When ``upsert`` is False the chunks are ADDED (used for a genuinely new,
+    disjoint generation — content or configuration changed). Because plain
+    ``add`` may silently ignore ids that already exist, ``upsert`` MUST be used
+    for the identical-generation case (``force_reindex`` with unchanged content
+    and configuration), where the new ids collide exactly with the old ones and
+    the intent is to refresh in place without deleting valid evidence.
     """
-    added_ids: List[str] = []
+    written_ids: List[str] = []
     for start in range(0, len(ids), batch_size):
         end = start + batch_size
         batch_ids = ids[start:end]
         try:
-            collection.add(
-                ids=batch_ids,
-                documents=documents_list[start:end],
-                metadatas=metadatas[start:end],
-            )
+            if upsert:
+                collection.upsert(
+                    ids=batch_ids,
+                    documents=documents_list[start:end],
+                    metadatas=metadatas[start:end],
+                )
+            else:
+                collection.add(
+                    ids=batch_ids,
+                    documents=documents_list[start:end],
+                    metadatas=metadatas[start:end],
+                )
         except Exception as e:  # noqa: BLE001
-            return False, added_ids, e
-        added_ids.extend(batch_ids)
-    return True, added_ids, None
+            return False, written_ids, e
+        written_ids.extend(batch_ids)
+    return True, written_ids, None
 
 
 def _rollback_added(collection, added_ids) -> bool:
@@ -926,13 +986,18 @@ def _rollback_added(collection, added_ids) -> bool:
         return False
 
 
-def _count_chunks_for(collection, relative_name: str) -> int:
-    """Return the number of chunks currently stored for a source document."""
+def _get_ids_for(collection, relative_name: str) -> List[str]:
+    """Return the exact chunk ids currently stored for a source document."""
     try:
         got = collection.get(where={"source_file": relative_name})
-        return len(got.get("ids", []) or [])
+        return list(got.get("ids", []) or [])
     except Exception:  # noqa: BLE001
-        return 0
+        return []
+
+
+def _count_chunks_for(collection, relative_name: str) -> int:
+    """Return the number of chunks currently stored for a source document."""
+    return len(_get_ids_for(collection, relative_name))
 
 
 def _add_in_batches(collection, ids, documents_list, metadatas, batch_size: int = 100):
