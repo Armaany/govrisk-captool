@@ -14,6 +14,21 @@ LIBRARY_UNAVAILABLE_MESSAGE = (
     "Generation is paused until the library connection is restored."
 )
 
+# Approved exact wording for the temporary/recovery index warning. The process
+# keeps a resolved-directory cache, so clicking "Update Library" does not
+# necessarily migrate back to configured storage during this process; the
+# wording must not promise that it will.
+RECOVERY_WARNING_MESSAGE = (
+    "Using a temporary search index. "
+    "It may need to be rebuilt when the app restarts."
+)
+
+MISSING_LIBRARY_MESSAGE = (
+    "Capability source library is missing or unreadable. "
+    "The existing search index has been preserved; document generation is "
+    "paused until the library is restored."
+)
+
 # ---------------------------------------------------------------------------
 # Module-level helper functions (used by tests)
 # ---------------------------------------------------------------------------
@@ -49,6 +64,89 @@ def _index_created_content(summary):
         return int(summary.get("chunks_created", 0)) > 0
     except (TypeError, ValueError):
         return False
+
+
+# Supported source-document extensions for counting present source files. Kept
+# in sync with the indexer's SUPPORTED_EXTENSIONS.
+SOURCE_DOC_EXTENSIONS = (".docx", ".pdf")
+
+
+def _count_source_documents(library_path):
+    """Return the number of supported source documents present, or None.
+
+    None means the library directory is missing or unreadable — which the UI
+    must distinguish from a genuinely empty library (zero supported files).
+    """
+    import os as _os
+    try:
+        entries = _os.listdir(library_path)
+    except OSError:
+        return None
+    count = 0
+    for name in entries:
+        full = _os.path.join(library_path, name)
+        if not _os.path.isfile(full):
+            continue
+        if _os.path.splitext(name)[1].lower() in SOURCE_DOC_EXTENSIONS:
+            count += 1
+    return count
+
+
+def _should_auto_index(chunk_count, source_document_count, already_attempted):
+    """Decide whether an automatic index run is safe to start.
+
+    Auto-index only when ALL hold:
+      * the searchable index is genuinely empty (chunk_count == 0),
+      * the library directory is readable (source_document_count is not None),
+      * at least one supported source document exists, and
+      * this process/session has not already attempted and failed auto-indexing.
+
+    This prevents an endless Streamlit rerun loop when the library is missing or
+    empty, or after a prior failed attempt.
+    """
+    if already_attempted:
+        return False
+    if chunk_count is None or chunk_count > 0:
+        return False
+    if source_document_count is None:
+        return False
+    if source_document_count < 1:
+        return False
+    return True
+
+
+def _derive_library_state(chunk_count, source_document_count, status, is_temporary):
+    """Map raw signals to a single user-visible library state string.
+
+    Returns one of:
+      "index_unavailable", "missing_library", "indexing", "empty_index",
+      "partial", "recovery", "ready".
+    Precedence favors the most actionable/honest state.
+    """
+    if status == "indexing_in_progress":
+        return "indexing"
+    if status == "index_unavailable" or chunk_count is None:
+        return "index_unavailable"
+    if status == "library_unavailable" or source_document_count is None:
+        return "missing_library"
+    if chunk_count == 0:
+        return "empty_index"
+    if status == "partial_success":
+        return "partial"
+    if is_temporary:
+        return "recovery"
+    return "ready"
+
+
+def _document_generation_enabled(library_state, chunk_count):
+    """Generation is disabled whenever the searchable index is empty/unavailable.
+
+    An infrastructure failure (index/library unavailable) must never be
+    presented downstream as "no relevant evidence found".
+    """
+    if library_state in ("index_unavailable", "missing_library", "empty_index", "indexing"):
+        return False
+    return bool(chunk_count and chunk_count > 0)
 
 
 def _show_library_unavailable_warning(ui, unavailable):
@@ -127,89 +225,146 @@ if api_key_missing:
 with st.sidebar:
     st.header("Library Status")
 
-    # Query ChromaDB for document count via the defensive shared factory.
     from config import CHROMA_DB_PATH
+
+    # --- Read-only signals. app.py is presentation-only and never writes the
+    # index or the manifest; the indexer owns all index state. ---
+
+    # Chunk count (search chunks) via the defensive shared factory. This is the
+    # number of stored chunks, NOT a document count.
+    chunk_count = None
     try:
         from chroma_client import get_collection
         collection = get_collection(CHROMA_DB_PATH)
-        doc_count = collection.count()
-        st.metric("Documents indexed", doc_count)
+        chunk_count = collection.count()
     except Exception as e:
-        doc_count = 0
-        st.metric("Documents indexed", 0)
-        st.caption(f"Index unavailable: {type(e).__name__}")
+        chunk_count = None
+        _index_error_name = type(e).__name__
 
-    # Honestly surface when the index is running from a temporary recovery
-    # location that will NOT survive an app restart, so users know the search
-    # index may need to be rebuilt.
+    # Storage mode (configured vs temporary recovery).
+    is_temporary = False
     try:
         from chroma_client import get_persist_status
         _persist_status = get_persist_status(CHROMA_DB_PATH)
-        if _persist_status.is_temporary:
-            st.warning(
-                "Search index is running from a temporary recovery location and "
-                "will not persist across restarts. Use Update Library to rebuild "
-                "once the configured storage is writable again."
-            )
+        is_temporary = _persist_status.is_temporary
     except Exception:
         _persist_status = None
-     # Auto-index on first run if library is empty
-    if doc_count == 0:
+
+    # Present source documents (supported files currently on disk). None means
+    # the library directory is missing/unreadable.
+    source_document_count = _count_source_documents(os.path.abspath(CAPABILITY_LIBRARY_PATH))
+
+    # Read the manifest that sits BESIDE the active index for indexed-document
+    # count and the last successful index timestamp. We only READ it here.
+    indexed_document_count = None
+    last_indexed_display = "Never"
+    manifest_status = None
+    try:
+        import json
+        from chroma_client import manifest_path as _manifest_path
+        _mpath = _manifest_path(CHROMA_DB_PATH)
+        if os.path.exists(_mpath):
+            with open(_mpath, encoding="utf-8") as f:
+                manifest = json.load(f)
+            indexed_document_count = manifest.get("indexed_documents_total")
+            last_indexed_display = manifest.get("last_successful_index_at") or "Unknown"
+    except Exception:
+        last_indexed_display = "Unknown"
+
+    # --- Safe auto-index: only when genuinely empty, library readable, at least
+    # one source doc, and not already attempted this session. Never loops. ---
+    if _should_auto_index(
+        chunk_count,
+        source_document_count,
+        st.session_state.get("auto_index_attempted", False),
+    ):
+        st.session_state["auto_index_attempted"] = True
         try:
             from capability_indexer import index_library
             with st.spinner("Building library index for first run..."):
                 auto_index_summary = index_library(force_reindex=False)
             if _index_created_content(auto_index_summary):
                 st.rerun()
-            else:
-                st.warning(
-                    "Capability library is not available. Opportunity monitoring "
-                    "remains available; document generation is disabled."
-                )
         except Exception as e:
-            st.warning(f"Auto-index failed: {e}")
-    # Last indexed date from the manifest that sits BESIDE the active index
-    # (configured or recovery), so status always matches the index in use.
-    try:
-        import json
-        from chroma_client import manifest_path as _manifest_path
-        _mpath = _manifest_path(CHROMA_DB_PATH)
-        if os.path.exists(_mpath):
-            with open(_mpath) as f:
-                manifest = json.load(f)
-            st.caption(f"Last indexed: {manifest.get('last_indexed', 'Unknown')}")
-        else:
-            st.caption("Last indexed: Never")
-    except Exception:
-        st.caption("Last indexed: Unknown")
+            st.warning(f"Auto-index failed: {type(e).__name__}")
 
-    # Update Library button
+    # --- Three honest counts. Never label a chunk count as a document count. ---
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.metric(
+            "Source documents",
+            source_document_count if source_document_count is not None else "—",
+        )
+    with col_b:
+        st.metric(
+            "Indexed documents",
+            indexed_document_count if indexed_document_count is not None else "—",
+        )
+    with col_c:
+        # collection.count() is ONLY ever displayed as chunks.
+        st.metric("Search chunks", chunk_count if chunk_count is not None else "—")
+
+    # --- User-visible state. ---
+    library_state = _derive_library_state(
+        chunk_count, source_document_count, manifest_status, is_temporary
+    )
+    if library_state == "index_unavailable":
+        st.error("Search index is unavailable. Document generation is disabled.")
+    elif library_state == "missing_library":
+        st.warning(MISSING_LIBRARY_MESSAGE)
+    elif library_state == "empty_index":
+        st.warning(
+            "Search index is empty. Document generation is disabled until the "
+            "library is indexed."
+        )
+    elif library_state == "recovery":
+        # Approved exact wording; no filesystem paths exposed.
+        st.warning(RECOVERY_WARNING_MESSAGE)
+
+    st.caption(f"Last indexed: {last_indexed_display}")
+
+    # --- Manual incremental synchronization. Presentation only: it calls the
+    # indexer (which owns the manifest) and renders the structured summary. ---
     if st.button("🔄 Update Library"):
-        with st.spinner("Indexing capability library..."):
+        with st.spinner("Synchronizing capability library..."):
             try:
                 from capability_indexer import index_library
                 summary = index_library(force_reindex=False)
-                # Update the manifest BESIDE the active index (configured or
-                # recovery) so "Last indexed" always describes the index in use.
-                import json
-                from datetime import datetime
-                from chroma_client import manifest_path as _manifest_path
-                _mpath = _manifest_path(CHROMA_DB_PATH)
-                with open(_mpath, "w") as f:
-                    json.dump({"last_indexed": datetime.now().strftime("%Y-%m-%d %H:%M")}, f)
-                st.success(
-                    f"Indexed {summary['documents_processed']} docs, "
-                    f"{summary['chunks_created']} chunks. "
-                    f"Skipped: {summary['documents_skipped']}."
-                )
-                st.session_state.retrieved_chunks = None
-                st.session_state.retrieval_unavailable = False
-                st.rerun()
+                status = summary.get("status")
+                if status == "indexing_in_progress":
+                    st.info("Indexing is already in progress. Please wait for it to finish.")
+                elif status in ("library_unavailable", "index_unavailable"):
+                    st.error(
+                        "Update could not run: {}".format(
+                            summary.get("error") or "index or library unavailable"
+                        )
+                    )
+                else:
+                    msg = (
+                        "Indexed {indexed} of {source} source documents · "
+                        "{chunks} search chunks. "
+                        "Processed: {processed} · Unchanged: {unchanged} · "
+                        "Removed: {removed} · Failed: {failed}."
+                    ).format(
+                        indexed=summary.get("indexed_documents_total", 0),
+                        source=summary.get("source_documents_total", 0),
+                        chunks=summary.get("chunks_total", 0),
+                        processed=summary.get("documents_processed", 0),
+                        unchanged=summary.get("documents_unchanged", 0),
+                        removed=summary.get("documents_removed", 0),
+                        failed=summary.get("documents_failed", 0),
+                    )
+                    if status == "partial_success":
+                        st.warning(msg)
+                    else:
+                        st.success(msg)
+                    st.session_state.retrieved_chunks = None
+                    st.session_state.retrieval_unavailable = False
+                    st.rerun()
             except Exception as e:
-                st.error(f"Failed to update library: {e}")
+                st.error(f"Failed to update library: {type(e).__name__}")
 
     st.divider()
-    st.caption(f"Library: {CAPABILITY_LIBRARY_PATH}")
     st.caption(f"Output: {OUTPUT_PATH}")
     st.caption(f"Model: {MODEL_NAME}")
 
@@ -370,11 +525,14 @@ if confirmed_tor_data:
 
 st.subheader("Step 3: Generate Capability Statement")
 
-# Guard conditions
+# Guard conditions. Generation depends on searchable evidence (chunks), not on
+# a document count. An unavailable index (chunk_count is None) also blocks
+# generation and must never be presented as "no relevant evidence found".
+searchable_chunks = chunk_count if isinstance(chunk_count, int) else 0
 can_generate = _can_generate(
     api_key_missing=api_key_missing,
     tor_data=confirmed_tor_data,
-    doc_count=doc_count,
+    doc_count=searchable_chunks,
     retrieval_unavailable=st.session_state.get("retrieval_unavailable", False),
 )
 
@@ -382,9 +540,14 @@ if api_key_missing:
     st.warning("Cannot generate: API key is missing.")
 if confirmed_tor_data is None:
     st.info("Please upload a ToR document and confirm your selections first.")
-if doc_count == 0:
+if chunk_count is None:
     st.warning(
-        "⚠️ The capability library is empty. "
+        "⚠️ The search index is unavailable, so document generation is disabled. "
+        "This is an infrastructure issue, not an absence of relevant evidence."
+    )
+elif chunk_count == 0:
+    st.warning(
+        "⚠️ The search index is empty. "
         "Click 'Update Library' in the sidebar to index your documents."
     )
 

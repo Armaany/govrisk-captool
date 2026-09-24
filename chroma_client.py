@@ -46,9 +46,22 @@ COLLECTION_NAME = "govrisk_capabilities"
 STORAGE_MODE_CONFIGURED = "configured"
 STORAGE_MODE_RECOVERY = "recovery"
 
+# Manifest filename written beside whichever index is actually active. Keeping
+# the name stable lets both the writer (indexer) and reader (sidebar) agree, and
+# lets an explicit rebuild invalidate a stale manifest along with the index.
+MANIFEST_FILENAME = "index_manifest.json"
+
 # Recognized Chroma-generated artifacts. Segment directories are 36-char UUIDs.
+# The index manifest is part of the generated-index lifecycle, so an explicit
+# rebuild removes it too (never leaving a manifest describing a wiped index).
 _CHROMA_FILE_ARTIFACTS = frozenset(
-    {"chroma.sqlite3", "chroma.sqlite3-shm", "chroma.sqlite3-wal", ".chroma_write_probe"}
+    {
+        "chroma.sqlite3",
+        "chroma.sqlite3-shm",
+        "chroma.sqlite3-wal",
+        ".chroma_write_probe",
+        MANIFEST_FILENAME,
+    }
 )
 _UUID_SEGMENT_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -248,10 +261,6 @@ def get_collection(configured_path):
 # ---------------------------------------------------------------------------
 # Public persistence-status API.
 # ---------------------------------------------------------------------------
-
-# Manifest filename written beside whichever index is actually active. Keeping
-# the name stable lets both the writer (indexer/app) and reader (sidebar) agree.
-MANIFEST_FILENAME = "index_manifest.json"
 
 
 def get_persist_status(configured_path):
