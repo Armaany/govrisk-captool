@@ -762,10 +762,12 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
 
         if not write_ok:
             logger.warning("Failed to write new generation for %s: %s", rel, write_error)
-            # Roll back only ids that did not already exist in the old generation
-            # (never delete surviving old-generation evidence).
-            rollback_targets = [cid for cid in written_ids if cid not in old_id_set]
-            rollback_ok = _rollback_added(collection, rollback_targets)
+            # Do NOT trust _add_generation bookkeeping: a batch may have inserted
+            # some ids before raising. Query actual stored state and remove the
+            # exact partial new generation while preserving the old generation.
+            rollback_ok, _surviving = _rollback_new_generation(
+                collection, rel, new_id_set, old_id_set
+            )
             category = "write_error" if rollback_ok else "write_error_rollback_failed"
             if not rollback_ok:
                 logger.error(
@@ -784,22 +786,28 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
             continue
 
         # Verify the complete new generation is actually stored before pruning
-        # the old one. This guards against a backend that silently drops writes:
-        # if any expected new id is missing, we do NOT delete the old generation.
+        # the old one. This guards against a backend that silently drops writes
+        # while reporting success: if any expected new id is missing, we roll back
+        # the partially-stored new generation and preserve the old one.
         stored_ids = set(_get_ids_for(collection, rel))
         missing = new_id_set - stored_ids
         if missing:
             logger.error(
                 "New generation for %s is incomplete after write (%d missing); "
-                "preserving old generation.", rel, len(missing)
+                "rolling back partial new generation and preserving old.",
+                rel, len(missing),
             )
+            rollback_ok, _surviving = _rollback_new_generation(
+                collection, rel, new_id_set, old_id_set
+            )
+            category = "write_incomplete" if rollback_ok else "write_incomplete_rollback_failed"
             failed_documents.append({
-                "filename": rel, "category": "write_incomplete", "reason": "write_incomplete",
+                "filename": rel, "category": category, "reason": category,
             })
             documents_inventory.append({
                 "filename": rel, "content_hash": content_hash, "file_size": file_size,
                 "chunk_count": _count_chunks_for(collection, rel),
-                "status": DOC_STATUS_FAILED, "failure_category": "write_incomplete",
+                "status": DOC_STATUS_FAILED, "failure_category": category,
             })
             if previously_indexed:
                 indexed_relnames.add(rel)
@@ -984,6 +992,56 @@ def _rollback_added(collection, added_ids) -> bool:
     except Exception as e:  # noqa: BLE001
         logger.error("Rollback delete failed: %s", e)
         return False
+
+
+def _rollback_new_generation(collection, relative_name, new_id_set, old_id_set):
+    """Remove any partially-stored new generation, preserving the old generation.
+
+    This does NOT trust ``_add_generation``'s bookkeeping. It queries the ids
+    actually stored for the document, so it catches ids inserted by a batch that
+    then raised, and ids the backend accepted despite a "success" that later
+    fails verification.
+
+    Rollback targets are computed as::
+
+        stored_ids  ∩  new_id_set  −  old_id_set
+
+    i.e. only ids that (a) are actually present, (b) belong to the new
+    generation, and (c) are NOT part of the old generation. This guarantees an
+    old-generation id is never deleted, including the same-generation
+    force-reindex/upsert path (where every new id is also an old id, so the
+    target set is empty).
+
+    Returns ``(ok, surviving_new_ids)``. ``ok`` is True only when, after the
+    delete, every old id still remains and no new-generation id (outside the old
+    generation) survives.
+    """
+    old_id_set = set(old_id_set)
+    new_id_set = set(new_id_set)
+    stored_before = set(_get_ids_for(collection, relative_name))
+    targets = (stored_before & new_id_set) - old_id_set
+
+    delete_ok = True
+    if targets:
+        try:
+            collection.delete(ids=list(targets))
+        except Exception as e:  # noqa: BLE001
+            logger.error("Rollback delete failed for %s: %s", relative_name, e)
+            delete_ok = False
+
+    stored_after = set(_get_ids_for(collection, relative_name))
+    # New-generation ids that survive and are not part of the old generation.
+    surviving_new = (stored_after & new_id_set) - old_id_set
+    # Every old-generation id must still be present.
+    old_ids_intact = old_id_set.issubset(stored_after)
+
+    ok = delete_ok and not surviving_new and old_ids_intact
+    if not ok:
+        logger.error(
+            "Rollback verification failed for %s: %d surviving new ids, "
+            "old_ids_intact=%s", relative_name, len(surviving_new), old_ids_intact
+        )
+    return ok, surviving_new
 
 
 def _get_ids_for(collection, relative_name: str) -> List[str]:

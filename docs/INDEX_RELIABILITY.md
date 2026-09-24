@@ -124,11 +124,30 @@ For a changed document the indexer:
 
 1. captures the exact old chunk IDs;
 2. adds all new-generation chunks first (batch by batch);
-3. if any batch fails, deletes the new-generation IDs already added and
-   preserves the old IDs/content entirely — reporting a `write_error` (or
-   `write_error_rollback_failed` if the rollback delete itself failed);
-4. only after every new batch succeeds, deletes the exact old IDs (never a broad
-   `source_file` delete that could remove the new generation).
+3. after the write, verifies every expected new ID is actually stored;
+4. on any failure — an exception mid-batch **or** an incomplete post-write
+   verification — rolls back the partial new generation and preserves the old
+   IDs/content entirely;
+5. only after the new generation is fully present and verified, deletes the
+   exact old IDs (never a broad `source_file` delete that could remove the new
+   generation).
+
+**Query-based rollback.** Rollback does not trust the writer's own bookkeeping
+(a batch can insert some IDs and then raise; a backend can accept IDs while a
+call is later judged incomplete). Instead it queries the IDs actually stored for
+the document and computes rollback targets as:
+
+```
+stored_ids  ∩  new_generation_ids  −  old_generation_ids
+```
+
+so it removes exactly the partial new generation and can **never** delete an
+old-generation ID — including the same-generation `force_reindex`/upsert path,
+where every new ID is also an old ID and the target set is therefore empty.
+Rollback is then verified: all old IDs must remain and no new-generation ID may
+survive. The reported failure category reflects the outcome: `write_error` or
+`write_incomplete` when rollback is clean, and `write_error_rollback_failed` or
+`write_incomplete_rollback_failed` when rollback failed or new IDs still survive.
 
 ## Index-configuration fingerprint
 

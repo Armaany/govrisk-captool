@@ -942,3 +942,160 @@ def test_app_reads_manifest_status_and_failed_total():
         source = f.read()
     assert 'manifest.get("status")' in source
     assert 'manifest.get("failed_documents_total"' in source
+
+
+# ===========================================================================
+# Transaction-cleanup correction tests (query-based rollback of new generation)
+# ===========================================================================
+
+def _seed_changed_doc(tmp_path):
+    """Index an original doc, then change its bytes so the next sync replaces it.
+
+    Returns (lib, chroma, before_ids, before_docs).
+    """
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    doc_path = lib / "a.docx"
+    _make_docx(doc_path, ["Original evidence about anti-corruption in Mexico."])
+    chroma = tmp_path / "chroma"
+
+    _run_index(lib, chroma)
+    col = _collection(chroma)
+    before = col.get(where={"source_file": "a.docx"}, include=["documents"])
+    before_ids = set(before["ids"])
+    before_docs = list(before["documents"])
+    assert before_ids
+
+    # Change the document so the next run treats it as a genuinely new generation
+    # (disjoint ids). Make it long enough to span multiple small batches.
+    long_text = " ".join(f"revised sentence {i} about justice reform." for i in range(400))
+    _make_docx(doc_path, [long_text])
+    return lib, chroma, before_ids, before_docs
+
+
+# --- A. Silent incomplete success: backend stores only part, does not raise ---
+
+def test_silent_incomplete_write_rolls_back_partial_new_generation(tmp_path):
+    lib, chroma, before_ids, before_docs = _seed_changed_doc(tmp_path)
+
+    import capability_indexer as ci
+    col = ci.get_collection(str(chroma))
+    real_add = col.add
+
+    def dropping_add(ids=None, documents=None, metadatas=None, **kwargs):
+        # Silently store only the FIRST id of each batch (no exception raised),
+        # simulating a backend that accepts the call but drops most writes.
+        keep = 1
+        real_add(
+            ids=list(ids[:keep]),
+            documents=list(documents[:keep]),
+            metadatas=list(metadatas[:keep]),
+        )
+        # Return normally -> _add_generation believes the whole batch succeeded.
+
+    with patch("capability_indexer.CAPABILITY_LIBRARY_PATH", str(lib) + os.sep):
+        with patch("capability_indexer.CHROMA_DB_PATH", str(chroma)):
+            with patch.object(col, "add", side_effect=dropping_add):
+                # Batches of 5 while dropping_add keeps only the first id, so 4 of
+                # every 5 new-generation chunks are silently dropped.
+                real_add_gen = ci._add_generation
+
+                def small_batches(collection, ids, docs, metas, batch_size=100, upsert=False):
+                    return real_add_gen(collection, ids, docs, metas, batch_size=5, upsert=upsert)
+
+                with patch.object(ci, "get_collection", return_value=col):
+                    with patch.object(ci, "_add_generation", side_effect=small_batches):
+                        summary = ci.index_library(force_reindex=False)
+
+    # Honest partial-success reporting.
+    assert summary["status"] == "partial_success"
+    fail = summary["failed_documents"][0]
+    assert fail["category"] == "write_incomplete"
+
+    # Inspect STORED Chroma state: old generation intact, no new-gen orphans.
+    col_after = _collection(chroma)
+    stored = col_after.get(where={"source_file": "a.docx"}, include=["documents"])
+    stored_ids = set(stored["ids"])
+    assert stored_ids == before_ids
+    assert list(stored["documents"]) == before_docs
+    # Zero new-generation ids remain anywhere in the collection.
+    all_ids = set(col_after.get()["ids"])
+    assert all_ids == before_ids  # no orphan chunks
+
+
+# --- B. Partial-write exception: batch inserts some ids, then raises ----------
+
+def test_partial_write_exception_discovers_and_removes_partial_new_ids(tmp_path):
+    lib, chroma, before_ids, before_docs = _seed_changed_doc(tmp_path)
+
+    import capability_indexer as ci
+    col = ci.get_collection(str(chroma))
+    real_add = col.add
+    state = {"calls": 0}
+
+    def partial_then_raise(ids=None, documents=None, metadatas=None, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 2:
+            # Insert the FIRST id of this batch, then raise. These inserted ids
+            # are NOT tracked by _add_generation's written_ids bookkeeping, so
+            # rollback must discover them by querying stored state.
+            if ids:
+                real_add(ids=list(ids[:1]), documents=list(documents[:1]),
+                         metadatas=list(metadatas[:1]))
+            raise RuntimeError("backend crashed mid-batch")
+        return real_add(ids=ids, documents=documents, metadatas=metadatas)
+
+    with patch("capability_indexer.CAPABILITY_LIBRARY_PATH", str(lib) + os.sep):
+        with patch("capability_indexer.CHROMA_DB_PATH", str(chroma)):
+            with patch.object(col, "add", side_effect=partial_then_raise):
+                real_add_gen = ci._add_generation
+
+                def small_batches(collection, ids, docs, metas, batch_size=100, upsert=False):
+                    # Two ids per batch so batch 2 inserts one id then raises.
+                    return real_add_gen(collection, ids, docs, metas, batch_size=2, upsert=upsert)
+
+                with patch.object(ci, "get_collection", return_value=col):
+                    with patch.object(ci, "_add_generation", side_effect=small_batches):
+                        summary = ci.index_library(force_reindex=False)
+
+    assert summary["status"] == "partial_success"
+    fail = summary["failed_documents"][0]
+    assert fail["category"] == "write_error"  # clean rollback
+
+    # STORED state: the partially-inserted new id was discovered and removed;
+    # old generation preserved exactly; no orphans anywhere.
+    col_after = _collection(chroma)
+    stored = col_after.get(where={"source_file": "a.docx"}, include=["documents"])
+    stored_ids = set(stored["ids"])
+    assert stored_ids == before_ids
+    assert list(stored["documents"]) == before_docs
+    assert set(col_after.get()["ids"]) == before_ids  # no orphan chunks
+
+
+# --- Direct unit test of the rollback helper's old-generation safety ----------
+
+def test_rollback_never_deletes_old_generation_ids(tmp_path):
+    """rollback targets exclude every old-generation id, even under overlap."""
+    import capability_indexer as ci
+    chroma = tmp_path / "chroma"
+    col = ci.get_collection(str(chroma))
+
+    old_ids = ["doc::h1::f1::chunk::000000", "doc::h1::f1::chunk::000001"]
+    # A partial new generation shares NO ids with old, plus one accidental overlap.
+    new_ids = ["doc::h2::f2::chunk::000000", "doc::h2::f2::chunk::000001",
+               "doc::h1::f1::chunk::000000"]  # overlaps an old id
+    col.add(
+        ids=old_ids + ["doc::h2::f2::chunk::000000"],
+        documents=["old0", "old1", "partial-new"],
+        metadatas=[{"source_file": "doc"}] * 3,
+    )
+
+    ok, surviving = ci._rollback_new_generation(col, "doc", set(new_ids), set(old_ids))
+
+    stored = set(col.get(where={"source_file": "doc"})["ids"])
+    # Both old ids remain (including the one that overlaps the new set).
+    assert set(old_ids).issubset(stored)
+    # The genuinely-new partial id was removed.
+    assert "doc::h2::f2::chunk::000000" not in stored
+    assert ok is True
+    assert surviving == set()
