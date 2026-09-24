@@ -33,12 +33,18 @@ import re
 import shutil
 import tempfile
 import uuid
+from dataclasses import dataclass
 
 import chromadb
 
 logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "govrisk_capabilities"
+
+# Storage-mode identifiers exposed to callers. These are stable strings that
+# may be written to the manifest and shown (indirectly) in the UI.
+STORAGE_MODE_CONFIGURED = "configured"
+STORAGE_MODE_RECOVERY = "recovery"
 
 # Recognized Chroma-generated artifacts. Segment directories are 36-char UUIDs.
 _CHROMA_FILE_ARTIFACTS = frozenset(
@@ -60,6 +66,38 @@ _RECOVERY_DIR = None
 
 class ChromaUnavailableError(RuntimeError):
     """Raised when no writable ChromaDB persist directory can be established."""
+
+
+@dataclass(frozen=True)
+class PersistStatus:
+    """Typed description of the persistence directory a caller will actually use.
+
+    Attributes
+    ----------
+    active_dir:
+        Absolute path of the directory ChromaDB is (or would be) using for this
+        configured path. This is where the manifest MUST be written so status
+        always sits beside the index it describes.
+    configured_dir:
+        Absolute path of the originally configured directory.
+    mode:
+        Either ``STORAGE_MODE_CONFIGURED`` (the persistent, configured location)
+        or ``STORAGE_MODE_RECOVERY`` (a process-specific fallback location).
+    is_temporary:
+        True when the active directory is a recovery location that will not
+        survive an app restart. Callers use this to warn honestly that the
+        search index may need to be rebuilt.
+    """
+
+    active_dir: str
+    configured_dir: str
+    mode: str
+    is_temporary: bool
+
+    @property
+    def is_recovery(self) -> bool:
+        """Return True when the active directory is a recovery fallback."""
+        return self.mode == STORAGE_MODE_RECOVERY
 
 
 def _dir_is_writable(path):
@@ -205,6 +243,63 @@ def get_collection(configured_path):
     """Return the shared capability collection, healing init failures."""
     client = get_client(configured_path)
     return client.get_or_create_collection(COLLECTION_NAME)
+
+
+# ---------------------------------------------------------------------------
+# Public persistence-status API.
+# ---------------------------------------------------------------------------
+
+# Manifest filename written beside whichever index is actually active. Keeping
+# the name stable lets both the writer (indexer/app) and reader (sidebar) agree.
+MANIFEST_FILENAME = "index_manifest.json"
+
+
+def get_persist_status(configured_path):
+    """Return a :class:`PersistStatus` for ``configured_path``.
+
+    This reports the directory a caller will *actually* use, distinguishing the
+    persistent configured location from a process-specific recovery fallback.
+
+    Resolution is consistent with :func:`get_client`:
+
+    * If a previous :func:`get_client`/:func:`get_collection` call in this
+      process already resolved onto a directory (recorded in the module cache),
+      that resolved directory is authoritative and reported verbatim. This is
+      what makes the status honest after recovery has occurred: we report the
+      recovery dir, not the configured one.
+    * Otherwise we resolve with the same writability preference used before a
+      client is opened (configured first, then recovery).
+
+    The returned ``active_dir`` is where the manifest MUST be written so index
+    status always sits beside the index it describes. ``is_temporary`` is True
+    only for recovery locations, which do not survive an app restart.
+    """
+    configured = os.path.abspath(configured_path)
+
+    resolved = _RESOLVED_PERSIST_DIR.get(configured)
+    if resolved is None:
+        resolved = resolve_persist_dir(configured_path)
+    active = os.path.abspath(resolved)
+
+    is_recovery = active != configured
+    mode = STORAGE_MODE_RECOVERY if is_recovery else STORAGE_MODE_CONFIGURED
+    return PersistStatus(
+        active_dir=active,
+        configured_dir=configured,
+        mode=mode,
+        is_temporary=is_recovery,
+    )
+
+
+def manifest_path(configured_path):
+    """Return the manifest path beside the *active* index for ``configured_path``.
+
+    Always resolves through :func:`get_persist_status` so the manifest is
+    written to (and read from) the same directory ChromaDB is actually using,
+    even after a fallback to the recovery location.
+    """
+    status = get_persist_status(configured_path)
+    return os.path.join(status.active_dir, MANIFEST_FILENAME)
 
 
 # ---------------------------------------------------------------------------

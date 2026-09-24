@@ -24,9 +24,14 @@ from unittest.mock import patch
 import chroma_client
 from chroma_client import (
     ChromaUnavailableError,
+    PersistStatus,
+    STORAGE_MODE_CONFIGURED,
+    STORAGE_MODE_RECOVERY,
     UnsafeRebuildTargetError,
     get_client,
     get_collection,
+    get_persist_status,
+    manifest_path,
     rebuild_index_dir,
     resolve_persist_dir,
     _dir_is_writable,
@@ -260,3 +265,84 @@ def test_recognized_artifact_matcher():
     assert _is_recognized_chroma_artifact("12345678-1234-1234-1234-1234567890ab") is True
     assert _is_recognized_chroma_artifact("IMPORTANT_README.txt") is False
     assert _is_recognized_chroma_artifact("notes") is False
+
+
+# ---------------------------------------------------------------------------
+# Persistence status + manifest-beside-active-index behaviour
+# ---------------------------------------------------------------------------
+
+def test_persist_status_configured_when_writable(tmp_path):
+    """A writable configured dir reports configured mode and is not temporary."""
+    configured = str(tmp_path / "configured")
+    status = get_persist_status(configured)
+
+    assert isinstance(status, PersistStatus)
+    assert status.mode == STORAGE_MODE_CONFIGURED
+    assert status.is_temporary is False
+    assert status.is_recovery is False
+    assert os.path.abspath(status.active_dir) == os.path.abspath(configured)
+    assert os.path.abspath(status.configured_dir) == os.path.abspath(configured)
+
+
+def test_persist_status_reports_recovery_after_fallback(tmp_path):
+    """After get_client recovers, status honestly reports the recovery dir."""
+    configured = str(tmp_path / "configured")
+
+    def fake_try_client(path):
+        if os.path.abspath(path) == os.path.abspath(configured):
+            raise RuntimeError("configured boom")
+        return _FakeClient(path)
+
+    with patch.object(chroma_client, "_try_client", side_effect=fake_try_client):
+        client = get_client(configured)
+        status = get_persist_status(configured)
+
+    # The cached resolved dir (recovery) is authoritative.
+    assert status.mode == STORAGE_MODE_RECOVERY
+    assert status.is_temporary is True
+    assert status.is_recovery is True
+    assert os.path.abspath(status.active_dir) == os.path.abspath(client.path)
+    assert os.path.abspath(status.active_dir) != os.path.abspath(configured)
+    assert os.path.abspath(status.configured_dir) == os.path.abspath(configured)
+
+
+def test_manifest_path_beside_configured_dir(tmp_path):
+    """Manifest sits inside the configured dir when it is writable."""
+    configured = str(tmp_path / "configured")
+    mpath = manifest_path(configured)
+
+    assert os.path.dirname(os.path.abspath(mpath)) == os.path.abspath(configured)
+    assert os.path.basename(mpath) == chroma_client.MANIFEST_FILENAME
+
+
+def test_manifest_path_follows_recovery_dir_after_fallback(tmp_path):
+    """Manifest path tracks the recovery dir once recovery has occurred."""
+    configured = str(tmp_path / "configured")
+
+    def fake_try_client(path):
+        if os.path.abspath(path) == os.path.abspath(configured):
+            raise RuntimeError("configured boom")
+        return _FakeClient(path)
+
+    with patch.object(chroma_client, "_try_client", side_effect=fake_try_client):
+        client = get_client(configured)
+        mpath = manifest_path(configured)
+
+    # Manifest is written beside the ACTIVE (recovery) index, not the
+    # configured one, so status never divorces from the index it describes.
+    assert os.path.dirname(os.path.abspath(mpath)) == os.path.abspath(client.path)
+    assert os.path.dirname(os.path.abspath(mpath)) != os.path.abspath(configured)
+
+
+def test_persist_status_prefers_resolved_cache(tmp_path):
+    """get_persist_status trusts a previously resolved dir over re-resolution."""
+    configured = str(tmp_path / "configured")
+    pinned = str(tmp_path / "pinned_recovery")
+    os.makedirs(pinned, exist_ok=True)
+    chroma_client._RESOLVED_PERSIST_DIR[os.path.abspath(configured)] = pinned
+
+    status = get_persist_status(configured)
+
+    assert os.path.abspath(status.active_dir) == os.path.abspath(pinned)
+    assert status.mode == STORAGE_MODE_RECOVERY
+    assert status.is_temporary is True

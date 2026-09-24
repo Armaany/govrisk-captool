@@ -138,6 +138,21 @@ with st.sidebar:
         doc_count = 0
         st.metric("Documents indexed", 0)
         st.caption(f"Index unavailable: {type(e).__name__}")
+
+    # Honestly surface when the index is running from a temporary recovery
+    # location that will NOT survive an app restart, so users know the search
+    # index may need to be rebuilt.
+    try:
+        from chroma_client import get_persist_status
+        _persist_status = get_persist_status(CHROMA_DB_PATH)
+        if _persist_status.is_temporary:
+            st.warning(
+                "Search index is running from a temporary recovery location and "
+                "will not persist across restarts. Use Update Library to rebuild "
+                "once the configured storage is writable again."
+            )
+    except Exception:
+        _persist_status = None
      # Auto-index on first run if library is empty
     if doc_count == 0:
         try:
@@ -153,12 +168,14 @@ with st.sidebar:
                 )
         except Exception as e:
             st.warning(f"Auto-index failed: {e}")
-    # Last indexed date from index_manifest.json
+    # Last indexed date from the manifest that sits BESIDE the active index
+    # (configured or recovery), so status always matches the index in use.
     try:
         import json
-        manifest_path = os.path.join(os.path.abspath(CHROMA_DB_PATH), "index_manifest.json")
-        if os.path.exists(manifest_path):
-            with open(manifest_path) as f:
+        from chroma_client import manifest_path as _manifest_path
+        _mpath = _manifest_path(CHROMA_DB_PATH)
+        if os.path.exists(_mpath):
+            with open(_mpath) as f:
                 manifest = json.load(f)
             st.caption(f"Last indexed: {manifest.get('last_indexed', 'Unknown')}")
         else:
@@ -172,11 +189,13 @@ with st.sidebar:
             try:
                 from capability_indexer import index_library
                 summary = index_library(force_reindex=False)
-                # Update manifest
+                # Update the manifest BESIDE the active index (configured or
+                # recovery) so "Last indexed" always describes the index in use.
                 import json
                 from datetime import datetime
-                manifest_path = os.path.join(os.path.abspath(CHROMA_DB_PATH), "index_manifest.json")
-                with open(manifest_path, "w") as f:
+                from chroma_client import manifest_path as _manifest_path
+                _mpath = _manifest_path(CHROMA_DB_PATH)
+                with open(_mpath, "w") as f:
                     json.dump({"last_indexed": datetime.now().strftime("%Y-%m-%d %H:%M")}, f)
                 st.success(
                     f"Indexed {summary['documents_processed']} docs, "
