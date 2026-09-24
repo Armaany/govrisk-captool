@@ -39,6 +39,85 @@ STALE_INDEX_MESSAGE = (
     "existing index."
 )
 
+# Exact label for the collapsed failed-document details expander.
+FAILED_DETAILS_EXPANDER_LABEL = "Show details"
+
+# Fallbacks for defensive display.
+UNKNOWN_DOCUMENT_LABEL = "Unknown document"
+UNKNOWN_FAILURE_LABEL = "Indexing failed"
+
+# Map of KNOWN, safe manifest category tokens to friendly, user-facing text.
+# Any category not in this map (unknown, missing, or malformed) is rendered as
+# UNKNOWN_FAILURE_LABEL — the raw token is never shown.
+FAILED_CATEGORY_LABELS = {
+    "docx_extraction_error": "Word document extraction failed",
+    "pdf_extraction_error": "PDF text extraction failed",
+    "read_error": "Document could not be read",
+    "no_text": "No extractable text found",
+    "write_error": "Search index update failed; previous evidence was preserved",
+    "write_incomplete": "Search index update was incomplete; previous evidence was preserved",
+    "write_error_rollback_failed": "Search index update and cleanup require attention",
+    "write_incomplete_rollback_failed": "Incomplete search index update requires attention",
+    "stale_delete_error": "Previous index generation could not be removed",
+    "removed_delete_error": "Removed document remains in the search index",
+}
+
+
+def _safe_failed_document_name(value):
+    """Return a safe, display-only filename from an arbitrary manifest value.
+
+    Converts backslashes to forward slashes, keeps only the final path
+    component, and trims whitespace. Any missing/blank/invalid value becomes
+    UNKNOWN_DOCUMENT_LABEL. No absolute path or directory structure is exposed.
+    """
+    if not isinstance(value, str):
+        return UNKNOWN_DOCUMENT_LABEL
+    normalized = value.replace("\\", "/").strip()
+    # Final component only; ignore trailing slashes.
+    final = normalized.rstrip("/").split("/")[-1].strip()
+    return final if final else UNKNOWN_DOCUMENT_LABEL
+
+
+def _friendly_failure_category(value):
+    """Map a known safe category token to friendly text.
+
+    Unknown, missing, or malformed categories return UNKNOWN_FAILURE_LABEL. The
+    raw token is never returned for an unknown value.
+    """
+    if not isinstance(value, str):
+        return UNKNOWN_FAILURE_LABEL
+    return FAILED_CATEGORY_LABELS.get(value.strip(), UNKNOWN_FAILURE_LABEL)
+
+
+def _safe_failed_document_details(failed_documents):
+    """Convert defensive manifest ``failed_documents`` into safe display records.
+
+    Pure function. For each valid record it reads ONLY the controlled fields
+    ``filename`` and ``category`` — never ``reason``, exception text, tracebacks,
+    absolute paths, or document content. Returns a list of
+    ``{"document": <safe name>, "reason": <friendly category>}`` with identical
+    rows de-duplicated (order preserved). Tolerates any malformed input (non-list
+    container, non-dict entries) without raising.
+    """
+    if not isinstance(failed_documents, (list, tuple)):
+        return []
+
+    seen = set()
+    details = []
+    for entry in failed_documents:
+        if not isinstance(entry, dict):
+            # Ignore malformed entries rather than crashing.
+            continue
+        document = _safe_failed_document_name(entry.get("filename"))
+        reason = _friendly_failure_category(entry.get("category"))
+        key = (document, reason)
+        if key in seen:
+            continue
+        seen.add(key)
+        details.append({"document": document, "reason": reason})
+    return details
+
+
 # ---------------------------------------------------------------------------
 # Module-level helper functions (used by tests)
 # ---------------------------------------------------------------------------
@@ -284,6 +363,7 @@ with st.sidebar:
     last_indexed_display = "Never"
     manifest_status = None
     manifest_failed_total = 0
+    manifest_failed_documents = []
     try:
         import json
         from chroma_client import manifest_path as _manifest_path
@@ -295,6 +375,7 @@ with st.sidebar:
             last_indexed_display = manifest.get("last_successful_index_at") or "Unknown"
             manifest_status = manifest.get("status")
             manifest_failed_total = manifest.get("failed_documents_total", 0) or 0
+            manifest_failed_documents = manifest.get("failed_documents", [])
     except Exception:
         last_indexed_display = "Unknown"
 
@@ -358,6 +439,16 @@ with st.sidebar:
             "Last update completed with {} document(s) that could not be "
             "indexed.".format(manifest_failed_total)
         )
+
+        # Collapsed details expander, populated ONLY from the safe manifest
+        # fields (filename + category), rendered as escaped text. Shown only when
+        # at least one valid/sanitized detail is available; if details are absent
+        # or malformed we keep just the count warning above.
+        _failed_details = _safe_failed_document_details(manifest_failed_documents)
+        if _failed_details:
+            with st.expander(FAILED_DETAILS_EXPANDER_LABEL, expanded=False):
+                for _detail in _failed_details:
+                    st.write("{} — {}".format(_detail["document"], _detail["reason"]))
 
     st.caption(f"Last indexed: {last_indexed_display}")
 
