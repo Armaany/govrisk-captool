@@ -88,6 +88,13 @@ STATUS_PARTIAL = "partial_success"
 STATUS_LIBRARY_UNAVAILABLE = "library_unavailable"
 STATUS_INDEX_UNAVAILABLE = "index_unavailable"
 STATUS_IN_PROGRESS = "indexing_in_progress"
+# Source folder is readable but contains zero supported documents while the
+# index still holds data. Incremental sync must NOT erase the index in this
+# case; clearing it requires a separate explicit destructive action.
+STATUS_SOURCE_LIBRARY_EMPTY = "source_library_empty"
+# The indexing work completed but the manifest could not be published
+# atomically. This is an infrastructure failure, not a normal ready outcome.
+STATUS_MANIFEST_WRITE_FAILED = "manifest_write_failed"
 
 # Per-document statuses.
 DOC_STATUS_INDEXED = "indexed"
@@ -113,6 +120,7 @@ class IndexingSummary(TypedDict, total=False):
     documents_unchanged: int
     documents_removed: int
     documents_failed: int
+    failed_documents_total: int   # == len(failed_documents); mirrors manifest
     storage_mode: str             # "configured" or "recovery"
     last_successful_index_at: Optional[str]  # UTC ISO 8601 ending in Z
     status: str                   # one of the STATUS_* values
@@ -151,13 +159,31 @@ def compute_file_hash(filepath: str) -> str:
     return h.hexdigest()
 
 
-def deterministic_chunk_id(relative_name: str, index: int) -> str:
-    """Return a stable chunk id derived from the document identity + position.
+def index_config_fingerprint() -> str:
+    """Return a short fingerprint of the effective index configuration.
 
-    Deterministic ids mean re-indexing a changed document overwrites the same
-    id space and cannot leave stale duplicate chunks behind.
+    The fingerprint incorporates the engine version and the chunking settings
+    (max tokens per chunk and overlap). When it differs from what a document's
+    chunks were indexed under, the document must be re-indexed even if its bytes
+    are unchanged, because the stored chunks no longer match the current config.
     """
-    return "{}::chunk::{:06d}".format(relative_name, index)
+    raw = "{}|max={}|overlap={}".format(
+        INDEX_ENGINE_VERSION, MAX_TOKENS_PER_CHUNK, CHUNK_OVERLAP_TOKENS
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def deterministic_chunk_id(relative_name: str, content_hash: str, index: int) -> str:
+    """Return a generation-specific, deterministic chunk id.
+
+    The id incorporates the normalized relative filename, the document's content
+    hash, and the chunk ordinal. Because the content hash is part of the id, a
+    changed document produces an entirely NEW id space (a new "generation"),
+    which is what makes transaction-safe replacement possible: new-generation
+    chunks can be added alongside the old ones and, on failure, deleted by their
+    exact ids without ever touching the old generation.
+    """
+    return "{}::{}::chunk::{:06d}".format(relative_name, content_hash, index)
 
 
 # ---------------------------------------------------------------------------
@@ -251,17 +277,21 @@ def _extract_pages(filepath: str, filename: str, ext: str):
     return [], "unknown", False, "unsupported_type"
 
 
-def _build_chunks_for_pages(page_texts, doc_type: str, relative_name: str):
-    """Chunk extracted pages into deterministic-id chunk records.
+def _build_chunks_for_pages(page_texts, doc_type: str, relative_name: str, content_hash: str):
+    """Chunk extracted pages into generation-specific chunk records.
 
     Returns ``(ids, documents, metadatas)`` aligned by position. Chunk ids are
-    deterministic on ``relative_name`` + ordinal so a re-index of a changed
-    document overwrites the same id space (no stale duplicates).
+    generation-specific (relative name + content hash + ordinal), so the chunks
+    for a changed document occupy a brand-new id space and can be written before
+    the old generation is removed. Each chunk records its ``content_hash`` and
+    the current ``config_fingerprint`` so future runs can detect either a
+    content change or an index-configuration change.
     """
     all_chunks: List[Tuple[str, int]] = []
     for page_number, text in page_texts:
         all_chunks.extend(chunk_text(text, page_number))
 
+    fingerprint = index_config_fingerprint()
     ids: List[str] = []
     documents_list: List[str] = []
     metadatas: List[dict] = []
@@ -278,8 +308,10 @@ def _build_chunks_for_pages(page_texts, doc_type: str, relative_name: str):
             "donor": "",
             "country": "",
             "doc_type": doc_type,
+            "content_hash": content_hash,
+            "config_fingerprint": fingerprint,
         })
-        ids.append(deterministic_chunk_id(relative_name, i))
+        ids.append(deterministic_chunk_id(relative_name, content_hash, i))
         documents_list.append(chunk_text_val)
     return ids, documents_list, metadatas
 
@@ -416,24 +448,37 @@ def _write_manifest_atomic(configured_path: str, manifest: dict) -> str:
     return target
 
 
-def _existing_doc_hashes(collection) -> dict:
-    """Map ``source_file`` -> most recently recorded ``content_hash`` in index.
+def _existing_doc_state(collection) -> dict:
+    """Map ``source_file`` -> recorded index state for that document.
 
-    Reads only metadata. Missing content_hash entries map to None so a legacy
-    index (indexed before hashes existed) is treated as changed and re-synced.
+    Each value is ``{"hash": <content_hash|None>, "fingerprint": <str|None>,
+    "ids": [<exact chunk ids>]}``. This captures the *exact* old chunk ids so a
+    changed document can be replaced transactionally (delete precisely those ids
+    only after the new generation is fully written), and records the config
+    fingerprint so a configuration change forces a re-index of unchanged bytes.
+
+    Reads only ids + metadata. Missing hash/fingerprint map to None so a legacy
+    index is treated as changed and re-synced.
     """
-    hashes: dict = {}
+    state: dict = {}
     try:
         existing = collection.get(include=["metadatas"])
     except Exception as e:  # noqa: BLE001
         logger.warning("Could not read existing index metadata: %s", e)
-        return hashes
-    for meta in existing.get("metadatas", []) or []:
-        src = meta.get("source_file")
+        return state
+    ids = existing.get("ids", []) or []
+    metas = existing.get("metadatas", []) or []
+    for chunk_id, meta in zip(ids, metas):
+        src = (meta or {}).get("source_file")
         if src is None:
             continue
-        hashes.setdefault(src, meta.get("content_hash"))
-    return hashes
+        entry = state.setdefault(
+            src, {"hash": (meta or {}).get("content_hash"),
+                  "fingerprint": (meta or {}).get("config_fingerprint"),
+                  "ids": []}
+        )
+        entry["ids"].append(chunk_id)
+    return state
 
 
 def _list_source_documents(library_path: str):
@@ -466,6 +511,7 @@ def _base_summary(storage_mode: str) -> dict:
         "documents_unchanged": 0,
         "documents_removed": 0,
         "documents_failed": 0,
+        "failed_documents_total": 0,
         "storage_mode": storage_mode,
         "last_successful_index_at": None,
         "status": STATUS_READY,
@@ -566,13 +612,59 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
 
     summary["source_documents_total"] = len(source_docs)
     present_relnames = {rel for rel, _ in source_docs}
-    existing_hashes = _existing_doc_hashes(collection)
+    existing_state = _existing_doc_state(collection)
+
+    try:
+        existing_chunk_total = collection.count()
+    except Exception:  # noqa: BLE001
+        existing_chunk_total = 0
+
+    # --- Empty-library protection (blocker 2) ------------------------------
+    # A readable but EMPTY source folder must not erase a non-empty valid index
+    # during incremental synchronization. Clearing every indexed document is a
+    # separate, explicit destructive action (rebuild), never a side effect here.
+    if not source_docs:
+        if existing_chunk_total > 0:
+            logger.warning(
+                "Source library is empty but the index still holds %d chunks; "
+                "preserving the index (source_library_empty).",
+                existing_chunk_total,
+            )
+            summary["chunks_total"] = existing_chunk_total
+            summary["indexed_documents_total"] = len(existing_state)
+            summary["status"] = STATUS_SOURCE_LIBRARY_EMPTY
+            summary["error"] = (
+                "No supported source documents are present. The existing search "
+                "index has been preserved and was not modified."
+            )
+            # Publish a manifest that honestly reflects the preserved index.
+            _publish_manifest_or_flag(
+                summary, storage_mode, documents_inventory=[
+                    {"filename": rel, "content_hash": st.get("hash"),
+                     "file_size": None, "chunk_count": len(st.get("ids", [])),
+                     "status": DOC_STATUS_UNCHANGED}
+                    for rel, st in sorted(existing_state.items())
+                ], failed_documents=[],
+            )
+            return IndexingSummary(**summary)
+        # Both source folder and index are empty.
+        summary["chunks_total"] = 0
+        summary["indexed_documents_total"] = 0
+        summary["status"] = STATUS_EMPTY_INDEX
+        _publish_manifest_or_flag(summary, storage_mode, [], [])
+        return IndexingSummary(**summary)
+
+    current_fingerprint = index_config_fingerprint()
 
     documents_inventory: List[dict] = []
     failed_documents: List[dict] = []
     indexed_relnames = set()
 
     for rel, filepath in source_docs:
+        prior = existing_state.get(rel)
+        previously_indexed = prior is not None
+        old_ids = list(prior["ids"]) if previously_indexed else []
+
         # Compute the current content hash first; a hash failure is a per-doc
         # failure that must not stop the run.
         try:
@@ -580,100 +672,136 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
             file_size = os.path.getsize(filepath)
         except OSError as e:
             logger.warning("Could not read source document %s: %s", rel, e)
-            failed_documents.append({"filename": rel, "category": "read_error", "reason": str(e)})
+            failed_documents.append({"filename": rel, "category": "read_error", "reason": "read_error"})
             documents_inventory.append({
                 "filename": rel, "content_hash": None, "file_size": None,
-                "chunk_count": 0, "status": DOC_STATUS_FAILED,
+                "chunk_count": _count_chunks_for(collection, rel), "status": DOC_STATUS_FAILED,
                 "failure_category": "read_error",
             })
             # Preserve whatever was previously indexed for this doc.
-            if rel in existing_hashes:
+            if previously_indexed:
                 indexed_relnames.add(rel)
             continue
 
-        previously_indexed = rel in existing_hashes
-        unchanged = (
-            previously_indexed
-            and not force_reindex
-            and existing_hashes.get(rel) == content_hash
-        )
+        # Unchanged means same content hash AND same index-configuration
+        # fingerprint. A configuration change forces a re-index (blocker 4).
+        hash_matches = previously_indexed and prior.get("hash") == content_hash
+        fingerprint_matches = previously_indexed and prior.get("fingerprint") == current_fingerprint
+        unchanged = hash_matches and fingerprint_matches and not force_reindex
 
         if unchanged:
             summary["documents_unchanged"] += 1
             indexed_relnames.add(rel)
             documents_inventory.append({
                 "filename": rel, "content_hash": content_hash, "file_size": file_size,
-                "chunk_count": _count_chunks_for(collection, rel),
-                "status": DOC_STATUS_UNCHANGED,
+                "chunk_count": len(old_ids), "status": DOC_STATUS_UNCHANGED,
             })
             continue
 
-        # New or changed (or forced): extract and prepare replacement BEFORE
-        # deleting anything, so an extraction failure preserves old chunks.
+        # New or changed (or forced, or config-changed): extract and prepare the
+        # replacement BEFORE deleting anything, so an extraction failure keeps
+        # the old generation intact.
         ext = os.path.splitext(filepath)[1].lower()
         pages, doc_type, ok, reason = _extract_pages(filepath, rel, ext)
         if not ok:
             failed_documents.append({"filename": rel, "category": reason, "reason": reason})
             documents_inventory.append({
                 "filename": rel, "content_hash": content_hash, "file_size": file_size,
-                "chunk_count": _count_chunks_for(collection, rel),
-                "status": DOC_STATUS_FAILED, "failure_category": reason,
+                "chunk_count": len(old_ids), "status": DOC_STATUS_FAILED,
+                "failure_category": reason,
             })
-            # Preserve previous valid chunks for a changed document.
             if previously_indexed:
                 indexed_relnames.add(rel)
             continue
 
-        ids, docs_list, metadatas = _build_chunks_for_pages(pages, doc_type, rel)
-        if not ids:
-            # No text/chunks produced. Treat as a soft failure but preserve any
-            # previous chunks (do not silently wipe a doc on a transient empty).
+        new_ids, docs_list, metadatas = _build_chunks_for_pages(
+            pages, doc_type, rel, content_hash
+        )
+        if not new_ids:
             logger.info("No chunks produced from %s", rel)
             failed_documents.append({"filename": rel, "category": "no_text", "reason": "no_text_extracted"})
             documents_inventory.append({
                 "filename": rel, "content_hash": content_hash, "file_size": file_size,
-                "chunk_count": _count_chunks_for(collection, rel),
-                "status": DOC_STATUS_FAILED, "failure_category": "no_text",
+                "chunk_count": len(old_ids), "status": DOC_STATUS_FAILED,
+                "failure_category": "no_text",
             })
             if previously_indexed:
                 indexed_relnames.add(rel)
             continue
 
-        # Stamp content hash on each chunk so future runs can detect changes.
-        for meta in metadatas:
-            meta["content_hash"] = content_hash
-
-        # Replacement succeeded in preparation: now remove old chunks (if any)
-        # and add the new ones. Deterministic ids also prevent duplicates.
-        try:
-            if previously_indexed:
-                collection.delete(where={"source_file": rel})
-            _add_in_batches(collection, ids, docs_list, metadatas)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Failed to write chunks for %s: %s", rel, e)
-            failed_documents.append({"filename": rel, "category": "write_error", "reason": str(e)})
+        # --- Transaction-safe replacement (blocker 1) ---------------------
+        # 1. Add the new generation first (its ids are content-hash specific and
+        #    disjoint from the old generation, unless bytes are unchanged but the
+        #    config changed — in which case ids collide and upsert is required).
+        # 2. If any batch fails, delete the new-generation ids added so far and
+        #    preserve the old generation entirely.
+        # 3. Only after every batch succeeds, delete the EXACT old ids (never a
+        #    broad source_file delete that could remove the new generation).
+        write_ok, added_ids, write_error = _add_generation(
+            collection, new_ids, docs_list, metadatas
+        )
+        if not write_ok:
+            logger.warning("Failed to write new generation for %s: %s", rel, write_error)
+            rollback_ok = _rollback_added(collection, added_ids)
+            category = "write_error" if rollback_ok else "write_error_rollback_failed"
+            if not rollback_ok:
+                logger.error(
+                    "Rollback of partial new generation FAILED for %s; "
+                    "index may contain orphan new-generation chunks.", rel
+                )
+            failed_documents.append({"filename": rel, "category": category, "reason": category})
             documents_inventory.append({
                 "filename": rel, "content_hash": content_hash, "file_size": file_size,
-                "chunk_count": _count_chunks_for(collection, rel),
-                "status": DOC_STATUS_FAILED, "failure_category": "write_error",
+                "chunk_count": _count_chunks_for(collection, rel), "status": DOC_STATUS_FAILED,
+                "failure_category": category,
             })
+            # Old evidence is preserved (never deleted on failure).
             if previously_indexed:
                 indexed_relnames.add(rel)
             continue
 
+        # New generation is fully written; now remove exactly the old ids that
+        # are not part of the new generation (bytes-unchanged + config-changed
+        # produces identical ids, so exclude them from deletion).
+        stale_old_ids = [cid for cid in old_ids if cid not in set(new_ids)]
+        if stale_old_ids:
+            try:
+                collection.delete(ids=stale_old_ids)
+            except Exception as e:  # noqa: BLE001
+                # New generation is present and correct; failing to prune the old
+                # generation is a partial success, not a data-loss event.
+                logger.warning("Failed to delete old generation for %s: %s", rel, e)
+                failed_documents.append({
+                    "filename": rel, "category": "stale_delete_error",
+                    "reason": "stale_delete_error",
+                })
+                documents_inventory.append({
+                    "filename": rel, "content_hash": content_hash, "file_size": file_size,
+                    "chunk_count": _count_chunks_for(collection, rel),
+                    "status": DOC_STATUS_FAILED, "failure_category": "stale_delete_error",
+                })
+                # The document IS indexed (new generation present).
+                indexed_relnames.add(rel)
+                continue
+
         summary["documents_processed"] += 1
-        summary["chunks_created"] += len(ids)
+        summary["chunks_created"] += len(new_ids)
         indexed_relnames.add(rel)
         documents_inventory.append({
             "filename": rel, "content_hash": content_hash, "file_size": file_size,
-            "chunk_count": len(ids), "status": DOC_STATUS_INDEXED,
+            "chunk_count": len(new_ids), "status": DOC_STATUS_INDEXED,
         })
-        logger.info("Indexed %s: %d chunks", rel, len(ids))
+        logger.info("Indexed %s: %d chunks", rel, len(new_ids))
 
-    # Removed documents: delete stale chunks only now that inventory succeeded.
-    for stale_rel in sorted(set(existing_hashes) - present_relnames):
+    # Removed documents: delete stale chunks by their EXACT ids, only now that a
+    # valid non-empty inventory has been established. A deletion failure is a
+    # partial success (blocker 3): the document is still present in Chroma, so it
+    # is still counted in indexed_documents_total and recorded as a failure.
+    for stale_rel in sorted(set(existing_state) - present_relnames):
+        stale_ids = list(existing_state[stale_rel]["ids"])
         try:
-            collection.delete(where={"source_file": stale_rel})
+            if stale_ids:
+                collection.delete(ids=stale_ids)
             summary["documents_removed"] += 1
             documents_inventory.append({
                 "filename": stale_rel, "content_hash": None, "file_size": None,
@@ -683,9 +811,21 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
             logger.info("Removed stale chunks for deleted document %s", stale_rel)
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to remove stale chunks for %s: %s", stale_rel, e)
+            failed_documents.append({
+                "filename": stale_rel, "category": "removed_delete_error",
+                "reason": "removed_delete_error",
+            })
+            documents_inventory.append({
+                "filename": stale_rel, "content_hash": existing_state[stale_rel].get("hash"),
+                "file_size": None, "chunk_count": _count_chunks_for(collection, stale_rel),
+                "status": DOC_STATUS_FAILED, "failure_category": "removed_delete_error",
+            })
+            # Still present in Chroma -> still counted as indexed.
+            indexed_relnames.add(stale_rel)
 
     # Final tallies.
     summary["documents_failed"] = len(failed_documents)
+    summary["failed_documents_total"] = len(failed_documents)
     summary["failed_documents"] = failed_documents
     summary["documents_skipped"] = summary["documents_unchanged"]
     summary["indexed_documents_total"] = len(indexed_relnames)
@@ -703,17 +843,24 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
     else:
         summary["status"] = STATUS_READY
 
-    # Write the manifest only after a successful or partially-successful sync.
-    summary["last_successful_index_at"] = _utc_now_z()
-    manifest = {
+    _publish_manifest_or_flag(summary, storage_mode, documents_inventory, failed_documents)
+    return IndexingSummary(**summary)
+
+
+def _build_manifest(summary: dict, storage_mode: str, documents_inventory, failed_documents) -> dict:
+    """Build the manifest dict from the current summary and inventories."""
+    return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
-        "last_successful_index_at": summary["last_successful_index_at"],
+        "status": summary["status"],
+        "last_successful_index_at": summary.get("last_successful_index_at"),
         "collection_name": COLLECTION_NAME,
         "storage_mode": storage_mode,
         "source_documents_total": summary["source_documents_total"],
         "indexed_documents_total": summary["indexed_documents_total"],
         "chunks_total": summary["chunks_total"],
+        "failed_documents_total": len(failed_documents),
         "failed_documents": failed_documents,
+        "config_fingerprint": index_config_fingerprint(),
         "settings": {
             "max_tokens_per_chunk": MAX_TOKENS_PER_CHUNK,
             "chunk_overlap_tokens": CHUNK_OVERLAP_TOKENS,
@@ -721,14 +868,62 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
         },
         "documents": documents_inventory,
     }
+
+
+def _publish_manifest_or_flag(summary: dict, storage_mode: str, documents_inventory, failed_documents):
+    """Atomically publish the manifest, or flag a publication failure.
+
+    On success, stamp ``last_successful_index_at`` and write the manifest.
+    On failure (blocker 5): do NOT claim a new successful timestamp was
+    persisted, set an explicit infrastructure status, and expose a safe error
+    category — never silently proceed as if everything completed normally.
+    """
+    # Tentative timestamp for the manifest content; only "kept" on success.
+    timestamp = _utc_now_z()
+    summary["last_successful_index_at"] = timestamp
+    manifest = _build_manifest(summary, storage_mode, documents_inventory, failed_documents)
     try:
         _write_manifest_atomic(CHROMA_DB_PATH, manifest)
     except Exception as e:  # noqa: BLE001
-        # A manifest write failure must not lose the actual indexing work; it is
-        # reported but does not change index contents.
-        logger.warning("Failed to write index manifest: %s", e)
+        logger.error("Failed to publish index manifest atomically: %s", e)
+        summary["status"] = STATUS_MANIFEST_WRITE_FAILED
+        summary["error"] = "manifest_write_failed"
+        # We cannot claim a successful persisted timestamp.
+        summary["last_successful_index_at"] = None
 
-    return IndexingSummary(**summary)
+
+def _add_generation(collection, ids, documents_list, metadatas, batch_size: int = 100):
+    """Add a new generation batch-by-batch, tracking exactly what was added.
+
+    Returns ``(ok, added_ids, error)``. ``added_ids`` lists the ids successfully
+    written so far (for precise rollback if a later batch fails).
+    """
+    added_ids: List[str] = []
+    for start in range(0, len(ids), batch_size):
+        end = start + batch_size
+        batch_ids = ids[start:end]
+        try:
+            collection.add(
+                ids=batch_ids,
+                documents=documents_list[start:end],
+                metadatas=metadatas[start:end],
+            )
+        except Exception as e:  # noqa: BLE001
+            return False, added_ids, e
+        added_ids.extend(batch_ids)
+    return True, added_ids, None
+
+
+def _rollback_added(collection, added_ids) -> bool:
+    """Delete new-generation ids added before a failure. Return success."""
+    if not added_ids:
+        return True
+    try:
+        collection.delete(ids=list(added_ids))
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error("Rollback delete failed: %s", e)
+        return False
 
 
 def _count_chunks_for(collection, relative_name: str) -> int:

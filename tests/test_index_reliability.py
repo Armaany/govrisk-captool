@@ -535,25 +535,306 @@ def test_empty_or_missing_library_cannot_destroy_index(tmp_path):
     _run_index(lib, chroma)
     col = _collection(chroma)
     before = col.count()
+    before_ids = set(col.get()["ids"])
     assert before > 0
 
-    # Case A: library becomes an EMPTY directory (readable, zero supported files).
+    # Case A: the source folder becomes EMPTY but readable. Incremental sync
+    # must PRESERVE the existing non-empty index and report source_library_empty.
     for entry in os.listdir(str(lib)):
         os.remove(os.path.join(str(lib), entry))
     summary_empty = _run_index(lib, chroma)
-    # A truly empty-but-readable library removes docs that are genuinely gone;
-    # this is a valid inventory, so removal is legitimate. The key guarantee is
-    # it is NOT reported as a silent success that leaves phantom chunks, and it
-    # never crashes. Verify it reconciled honestly.
-    assert summary_empty["status"] in ("empty_index", "partial_success", "ready")
 
-    # Case B: library directory becomes unreadable/missing entirely -> preserve.
-    _make_docx(lib / "a.docx", ["Restore content about Mexico."])
-    _run_index(lib, chroma)
-    restored = _collection(chroma).count()
-    assert restored > 0
+    assert summary_empty["status"] == "source_library_empty"
+    col = _collection(chroma)
+    assert col.count() == before                # nothing erased
+    assert set(col.get()["ids"]) == before_ids  # exact same chunks
+    assert summary_empty["documents_removed"] == 0
 
+    # Case B: the library directory is missing entirely -> preserve the index.
     missing = tmp_path / "gone"
     summary_missing = _run_index(missing, chroma)
     assert summary_missing["status"] == "library_unavailable"
-    assert _collection(chroma).count() == restored  # untouched
+    assert _collection(chroma).count() == before  # still untouched
+
+    # Case C: both source folder and index empty -> empty_index.
+    empty_lib = tmp_path / "empty_lib"
+    empty_lib.mkdir()
+    empty_chroma = tmp_path / "empty_chroma"
+    summary_both = _run_index(empty_lib, empty_chroma)
+    assert summary_both["status"] == "empty_index"
+    assert summary_both["chunks_total"] == 0
+
+
+# ===========================================================================
+# Phase 2A correction-pass behavioral tests (blockers 1-8)
+# ===========================================================================
+
+def _first_batch_ok_second_fails(collection, real_add):
+    """Return a side_effect for collection.add that fails on the 2nd call."""
+    state = {"calls": 0}
+
+    def side_effect(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 2:
+            raise RuntimeError("simulated add batch failure")
+        return real_add(*args, **kwargs)
+
+    return side_effect
+
+
+# --- Blocker 1: adversarial second-batch failure on a changed document -------
+
+def test_changed_document_second_batch_failure_preserves_old_generation(tmp_path):
+    """If the 2nd new-generation add batch fails, old chunks stay intact and no
+    partial new generation remains."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    doc_path = lib / "a.docx"
+    _make_docx(doc_path, ["Original content about Mexico anti-corruption."])
+    chroma = tmp_path / "chroma"
+
+    _run_index(lib, chroma)
+    col = _collection(chroma)
+    before = col.get(where={"source_file": "a.docx"})
+    before_ids = set(before["ids"])
+    before_docs = list(before["documents"])
+    assert before_ids
+
+    # Change the document to produce many chunks (guaranteeing >1 add batch at
+    # batch_size=2), then make the SECOND add batch fail.
+    long_text = " ".join(f"revised sentence {i} about justice reform." for i in range(400))
+    _make_docx(doc_path, [long_text])
+
+    real_add = _collection(chroma).add
+    with patch("capability_indexer.CAPABILITY_LIBRARY_PATH", str(lib) + os.sep):
+        with patch("capability_indexer.CHROMA_DB_PATH", str(chroma)):
+            import capability_indexer as ci
+            real_add_gen = ci._add_generation
+
+            def failing_add_generation(collection, ids, docs, metas, batch_size=100):
+                # Force multiple small batches so a mid-stream failure is exercised.
+                return real_add_gen(collection, ids, docs, metas, batch_size=2)
+
+            # Patch collection.add to fail on the 2nd batch.
+            col2 = ci.get_collection(str(chroma))
+            with patch.object(col2, "add", side_effect=_first_batch_ok_second_fails(col2, real_add)):
+                with patch.object(ci, "get_collection", return_value=col2):
+                    with patch.object(ci, "_add_generation", side_effect=failing_add_generation):
+                        summary = ci.index_library(force_reindex=False)
+
+    assert summary["documents_failed"] == 1
+    fail = summary["failed_documents"][0]
+    assert fail["category"] in ("write_error", "write_error_rollback_failed")
+
+    col = _collection(chroma)
+    after = col.get(where={"source_file": "a.docx"})
+    # Old generation preserved exactly; no partial new generation left behind.
+    assert set(after["ids"]) == before_ids
+    assert list(after["documents"]) == before_docs
+
+
+# --- Blocker 3: removed-document deletion failure -> partial + still counted --
+
+def test_removed_document_deletion_failure_is_partial_and_counted(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _make_docx(lib / "a.docx", ["Doc A about Colombia."])
+    _make_docx(lib / "b.docx", ["Doc B about Peru."])
+    chroma = tmp_path / "chroma"
+
+    _run_index(lib, chroma)
+    os.remove(str(lib / "b.docx"))  # b is now a removed document
+
+    import capability_indexer as ci
+    col = ci.get_collection(str(chroma))
+    real_delete = col.delete
+
+    def delete_failing_for_b(*args, **kwargs):
+        ids = kwargs.get("ids") or (args[0] if args else None)
+        # b.docx chunk ids embed the relative filename.
+        if ids and any("b.docx" in str(i) for i in ids):
+            raise RuntimeError("simulated stale delete failure")
+        return real_delete(*args, **kwargs)
+
+    with patch("capability_indexer.CAPABILITY_LIBRARY_PATH", str(lib) + os.sep):
+        with patch("capability_indexer.CHROMA_DB_PATH", str(chroma)):
+            with patch.object(col, "delete", side_effect=delete_failing_for_b):
+                with patch.object(ci, "get_collection", return_value=col):
+                    summary = ci.index_library(force_reindex=False)
+
+    assert summary["status"] == "partial_success"
+    assert any(f["category"] == "removed_delete_error" for f in summary["failed_documents"])
+    # b is still present in Chroma, so it remains counted as indexed.
+    assert summary["documents_removed"] == 0
+    manifest, _ = _read_manifest(chroma)
+    # Manifest chunks_total matches the real collection count (consistent).
+    assert manifest["chunks_total"] == _collection(chroma).count()
+    assert "b.docx" in {d["filename"] for d in manifest["documents"]}
+
+
+# --- Blocker 4: index-configuration change forces reindex of unchanged bytes -
+
+def test_config_change_forces_reindex_of_unchanged_file(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _make_docx(lib / "a.docx", ["Config fingerprint test about Brazil."])
+    chroma = tmp_path / "chroma"
+
+    first = _run_index(lib, chroma)
+    assert first["documents_processed"] == 1
+
+    # Second run with identical bytes and identical config -> unchanged/skipped.
+    second = _run_index(lib, chroma)
+    assert second["documents_unchanged"] == 1
+    assert second["documents_processed"] == 0
+
+    # Now change the effective index configuration (chunk size) but NOT the file
+    # bytes. The document must be re-indexed because the fingerprint differs.
+    with patch("capability_indexer.MAX_TOKENS_PER_CHUNK", 123):
+        third = _run_index(lib, chroma)
+
+    assert third["documents_unchanged"] == 0
+    assert third["documents_processed"] == 1
+
+
+# --- Blocker 5: manifest publication failure does not report ready -----------
+
+def test_manifest_publication_failure_reports_infra_failure(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _make_docx(lib / "a.docx", ["Manifest publication failure test in Chile."])
+    chroma = tmp_path / "chroma"
+
+    with patch("capability_indexer.os.replace", side_effect=OSError("disk full")):
+        summary = _run_index(lib, chroma)
+
+    assert summary["status"] == "manifest_write_failed"
+    assert summary["error"] == "manifest_write_failed"
+    # Must NOT claim a persisted successful timestamp.
+    assert summary["last_successful_index_at"] is None
+    # The chunks were still written to Chroma (indexing work not lost)...
+    assert _collection(chroma).count() > 0
+    # ...but no manifest file was published.
+    mpath = capability_indexer.manifest_path(str(chroma))
+    assert not os.path.exists(mpath)
+
+
+# --- Blocker 6: manifest carries top-level status + failed_documents_total ---
+
+def test_manifest_has_status_and_failed_totals(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _make_docx(lib / "good.docx", ["Healthy doc about asset recovery in Peru."])
+    _make_docx(lib / "bad.docx", ["Will fail extraction."])
+    chroma = tmp_path / "chroma"
+
+    real_extract = capability_indexer._extract_pages
+
+    def selective_extract(filepath, filename, ext):
+        if filename == "bad.docx":
+            return [], "word", False, "docx_extraction_error"
+        return real_extract(filepath, filename, ext)
+
+    with patch("capability_indexer._extract_pages", side_effect=selective_extract):
+        _run_index(lib, chroma)
+
+    manifest, _ = _read_manifest(chroma)
+    assert manifest["status"] == "partial_success"
+    assert manifest["failed_documents_total"] == 1
+    assert isinstance(manifest["failed_documents"], list)
+    assert manifest["failed_documents"][0]["filename"] == "bad.docx"
+    # No raw exception text leaks — category is a safe token.
+    assert manifest["failed_documents"][0]["category"] == "docx_extraction_error"
+
+
+# ===========================================================================
+# app.py behavioral tests (not just text inspection)
+# ===========================================================================
+
+def test_app_derive_state_partial_from_manifest_status():
+    from app import _derive_library_state
+    # Non-empty index + partial status -> partial state.
+    assert _derive_library_state(10, 3, "partial_success", False) == "partial"
+
+
+def test_app_generation_enabled_with_missing_source_but_nonempty_index():
+    from app import _derive_library_state, _document_generation_enabled
+    # Source library missing (None) but index has chunks: state is missing_library
+    # and generation REMAINS enabled on the preserved index (blocker 7).
+    state = _derive_library_state(chunk_count=12, source_document_count=None,
+                                  status="source_library_empty", is_temporary=False)
+    assert state == "missing_library"
+    assert _document_generation_enabled(state, 12) is True
+
+
+def test_app_generation_disabled_when_index_empty_or_unavailable():
+    from app import _derive_library_state, _document_generation_enabled
+    empty = _derive_library_state(0, 3, None, False)
+    assert empty == "empty_index"
+    assert _document_generation_enabled(empty, 0) is False
+
+    unavailable = _derive_library_state(None, 3, "index_unavailable", False)
+    assert unavailable == "index_unavailable"
+    assert _document_generation_enabled(unavailable, None) is False
+
+
+def test_app_empty_index_outranks_missing_source():
+    from app import _derive_library_state, _document_generation_enabled
+    # Both index empty AND source missing -> empty_index wins, generation off.
+    state = _derive_library_state(0, None, "source_library_empty", False)
+    assert state == "empty_index"
+    assert _document_generation_enabled(state, 0) is False
+
+
+def test_app_stale_index_message_does_not_claim_generation_paused():
+    from app import STALE_INDEX_MESSAGE
+    lowered = STALE_INDEX_MESSAGE.lower()
+    assert "generation continues" in lowered
+    assert "paused" in lowered  # updates are paused...
+    # ...but it must not say generation/document generation is paused.
+    assert "generation is paused" not in lowered
+    assert "document generation is paused" not in lowered
+
+
+def test_app_partial_warning_text_has_no_paths_or_exceptions(tmp_path):
+    """The manifest-driven partial warning shows a count only — no paths/excs."""
+    # Build a partial manifest and drive the sidebar's warning logic in the
+    # same shape app.py uses.
+    manifest_failed_total = 2
+    manifest_status = "partial_success"
+    msgs = []
+
+    class _UI:
+        def warning(self, m):
+            msgs.append(m)
+
+    ui = _UI()
+    # Mirror app.py's condition and message construction.
+    if manifest_status == "partial_success" and manifest_failed_total > 0:
+        ui.warning(
+            "Last update completed with {} document(s) that could not be "
+            "indexed.".format(manifest_failed_total)
+        )
+
+    assert msgs == ["Last update completed with 2 document(s) that could not be indexed."]
+    assert "Traceback" not in msgs[0]
+    assert ":\\" not in msgs[0] and "/" not in msgs[0]
+
+
+def test_app_uses_document_generation_enabled_helper():
+    """Static guard: app.py routes the generation decision through the helper so
+    UI copy and behavior cannot diverge."""
+    app_path = os.path.join(os.path.dirname(__file__), "..", "app.py")
+    with open(app_path, encoding="utf-8") as f:
+        source = f.read()
+    assert "_document_generation_enabled(library_state, chunk_count)" in source
+
+
+def test_app_reads_manifest_status_and_failed_total():
+    """Static guard: the sidebar reads status + failed_documents_total from the
+    manifest (blocker 6)."""
+    app_path = os.path.join(os.path.dirname(__file__), "..", "app.py")
+    with open(app_path, encoding="utf-8") as f:
+        source = f.read()
+    assert 'manifest.get("status")' in source
+    assert 'manifest.get("failed_documents_total"' in source

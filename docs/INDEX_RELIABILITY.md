@@ -58,13 +58,16 @@ directory, `flush`+`fsync`, then `os.replace`). Fields:
 | Field | Meaning |
 |---|---|
 | `schema_version` | Manifest structure version (currently `1`). |
-| `last_successful_index_at` | Timezone-aware UTC ISO 8601 ending in `Z`. |
+| `status` | Top-level run status (one of the `STATUS_*` values). |
+| `last_successful_index_at` | Timezone-aware UTC ISO 8601 ending in `Z`. Null if publication failed. |
 | `collection_name` | Chroma collection name. |
 | `storage_mode` | `configured` or `recovery`. |
 | `source_documents_total` | Supported source files present at sync time. |
 | `indexed_documents_total` | Distinct successfully indexed source files. |
 | `chunks_total` | `collection.count()` after sync. |
-| `failed_documents` | List of `{filename, category, reason}` (safe reasons only). |
+| `failed_documents_total` | Count of failed documents (mirrors the list length). |
+| `failed_documents` | List of `{filename, category, reason}` (safe tokens only). |
+| `config_fingerprint` | Fingerprint of the effective index configuration. |
 | `settings` | `{max_tokens_per_chunk, chunk_overlap_tokens, index_engine_version}`. |
 | `documents` | Per-document inventory (see below). |
 
@@ -72,36 +75,92 @@ Per-document inventory entries carry: normalized relative `filename`, SHA-256
 `content_hash`, `file_size`, indexed `chunk_count`, `status`, and a safe
 `failure_category` when applicable.
 
-The manifest is written only after a **successful or partially-successful** sync.
-It is not written for `library_unavailable`, `index_unavailable`, or
+The manifest is written only after a run that reached the tally/publish stage
+(`ready`, `partial_success`, `empty_index`, `source_library_empty`). It is not
+written for `library_unavailable`, `index_unavailable`, or
 `indexing_in_progress` outcomes.
+
+## Generation-specific chunk IDs
+
+Chunk IDs are generation-specific and deterministic:
+
+```
+<relative_name>::<content_hash>::chunk::<ordinal>
+```
+
+Because the content hash is part of the ID, a changed document produces an
+entirely new ID space (a new "generation") that is disjoint from the old one.
+This is what makes transaction-safe replacement possible.
 
 ## SHA-256 incremental reconciliation
 
 Synchronization is content-hash based, not filename-only:
 
 - **New document** — extract, chunk, index.
-- **Unchanged** (same relative filename and same SHA-256) — skip.
-- **Changed hash** — extract and prepare replacement chunks *first*; only after
-  the replacement is ready are the old chunks deleted and new ones written.
-- **Removed source document** — its stale chunks are deleted, but only after a
-  valid source-directory inventory succeeds.
+- **Unchanged** — same relative filename, same SHA-256, *and* same index-config
+  fingerprint — skip.
+- **Changed hash** — extract and build the new generation; add it *first*; only
+  after every batch succeeds are the exact old-generation IDs deleted.
+- **Removed source document** — its stale chunks are deleted by their exact IDs,
+  but only after a valid source-directory inventory succeeds.
 - **Unsupported files** — ignored.
 
-Chunk IDs are deterministic (`<relative_name>::chunk::<ordinal>`), so re-indexing
-a changed document overwrites the same ID space and cannot leave duplicate stale
-chunks.
+### Transaction-safe changed-document replacement
+
+For a changed document the indexer:
+
+1. captures the exact old chunk IDs;
+2. adds all new-generation chunks first (batch by batch);
+3. if any batch fails, deletes the new-generation IDs already added and
+   preserves the old IDs/content entirely — reporting a `write_error` (or
+   `write_error_rollback_failed` if the rollback delete itself failed);
+4. only after every new batch succeeds, deletes the exact old IDs (never a broad
+   `source_file` delete that could remove the new generation).
+
+## Index-configuration fingerprint
+
+`index_config_fingerprint()` hashes `INDEX_ENGINE_VERSION`,
+`MAX_TOKENS_PER_CHUNK`, and `CHUNK_OVERLAP_TOKENS`. Each chunk records the
+fingerprint it was indexed under. When the current fingerprint differs from a
+document's recorded fingerprint, the document is re-indexed even if its bytes are
+unchanged, because the stored chunks no longer match the active configuration.
 
 ### Failure preservation
 
 - **Extraction failure for a changed document** preserves its previous valid
   chunks (nothing is deleted because the replacement was never prepared).
+- **Write failure while adding the new generation** rolls back the partial new
+  generation and preserves the old generation exactly.
+- **Removed-document deletion failure** is a partial success: the document is
+  still present in Chroma, so it stays counted in `indexed_documents_total`, and
+  the failure is recorded as `removed_delete_error`. The manifest stays
+  consistent with what actually remains in Chroma.
 - **One failed document never blocks** healthy documents from indexing.
-- A **missing or unreadable library** preserves the existing index and returns an
-  explicit failure state (`status == "library_unavailable"`). It is **never**
-  treated as a successful empty library, so an empty/missing library cannot
-  silently destroy a valid index.
+- A **missing or unreadable library** preserves the existing index and returns
+  `status == "library_unavailable"`. It is **never** treated as a successful
+  empty library.
 - Source documents are never modified or deleted by any code path.
+
+### Empty-library protection
+
+A readable but **empty** source folder must not erase a non-empty valid index:
+
+- Zero supported documents present **and** the index still holds data →
+  `status == "source_library_empty"`; the index is preserved unchanged, and no
+  removals are performed. Clearing every indexed document requires a separate
+  explicit destructive action (rebuild), never incremental sync.
+- Both the source folder and the index are empty → `status == "empty_index"`.
+- When some supported documents remain, genuinely removed documents are
+  reconciled normally.
+
+## Manifest publication failure
+
+The manifest is published atomically (temp file + `fsync` + `os.replace`). If
+publication fails, the run does **not** report a normal ready status: it returns
+`status == "manifest_write_failed"` with the safe error category
+`manifest_write_failed`, and `last_successful_index_at` is set to `null` (we do
+not claim a timestamp was persisted). The indexing work already written to Chroma
+is not lost, but the status is surfaced honestly rather than silently completing.
 
 ## Concurrency protection
 
@@ -126,13 +185,27 @@ or after a prior failed attempt. Manual **Update Library** performs incremental
 synchronization and presents processed, unchanged, removed, failed,
 indexed-document, and chunk totals.
 
-## User-visible states
+## User-visible states and generation
 
 `app._derive_library_state(...)` maps signals to one of: `ready`, `indexing`,
 `empty_index`, `missing_library`, `partial`, `recovery`, `index_unavailable`.
-Document generation is disabled whenever the searchable index is empty or
-unavailable. An infrastructure failure is never presented as
-"no relevant evidence found".
+An unavailable or empty *index* outranks a missing/empty *source library*.
+
+Document generation depends on **searchable evidence (a non-empty index)**, not
+on the presence of the source library. `app._document_generation_enabled(...)`
+is the single source of truth, and the generation guard routes through it so UI
+copy and behavior cannot disagree:
+
+- **Index empty, unavailable, or indexing in progress** → generation disabled.
+- **Source library missing/empty but the index is non-empty** →
+  `missing_library` state; the UI warns that updates are paused and the index
+  may be stale, but generation **continues** on the preserved index. The copy
+  never claims generation is paused.
+
+An infrastructure failure is never presented downstream as "no relevant evidence
+found". The sidebar also reads the manifest `status` and `failed_documents_total`
+and shows a concise partial-success warning (a count only — no raw exception text
+or filesystem paths).
 
 ## Explicit rebuild and manifest invalidation
 

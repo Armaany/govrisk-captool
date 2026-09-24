@@ -29,6 +29,16 @@ MISSING_LIBRARY_MESSAGE = (
     "paused until the library is restored."
 )
 
+# Shown when the source library is missing/empty but a non-empty index remains.
+# Generation continues on the preserved index, so the copy must NOT claim
+# generation is paused; it only warns that updates are unavailable and the
+# index may be stale (blocker 7).
+STALE_INDEX_MESSAGE = (
+    "Source library is unavailable, so library updates are paused and the "
+    "search index may be stale. Document generation continues using the "
+    "existing index."
+)
+
 # ---------------------------------------------------------------------------
 # Module-level helper functions (used by tests)
 # ---------------------------------------------------------------------------
@@ -119,18 +129,27 @@ def _derive_library_state(chunk_count, source_document_count, status, is_tempora
     """Map raw signals to a single user-visible library state string.
 
     Returns one of:
-      "index_unavailable", "missing_library", "indexing", "empty_index",
+      "index_unavailable", "empty_index", "missing_library", "indexing",
       "partial", "recovery", "ready".
-    Precedence favors the most actionable/honest state.
+
+    Precedence favors the most actionable/honest state. Crucially, an
+    unavailable or empty *index* outranks a missing/empty *source library*: if
+    the index itself has no usable evidence, generation must be blocked
+    regardless of whether the source folder is present. But when the index is
+    non-empty and only the source library is missing/empty, the state is
+    ``missing_library`` — updates are unavailable and the index may be stale,
+    yet generation can still proceed on the preserved index (blocker 7).
     """
     if status == "indexing_in_progress":
         return "indexing"
     if status == "index_unavailable" or chunk_count is None:
         return "index_unavailable"
-    if status == "library_unavailable" or source_document_count is None:
-        return "missing_library"
     if chunk_count == 0:
+        # No usable evidence in the index — this outranks source availability.
         return "empty_index"
+    if status in ("library_unavailable", "source_library_empty") or source_document_count in (None, 0):
+        # Non-empty index but the source library is missing/empty.
+        return "missing_library"
     if status == "partial_success":
         return "partial"
     if is_temporary:
@@ -139,12 +158,16 @@ def _derive_library_state(chunk_count, source_document_count, status, is_tempora
 
 
 def _document_generation_enabled(library_state, chunk_count):
-    """Generation is disabled whenever the searchable index is empty/unavailable.
+    """Return True when document generation may proceed.
 
-    An infrastructure failure (index/library unavailable) must never be
-    presented downstream as "no relevant evidence found".
+    Generation depends on searchable evidence (a non-empty index), NOT on the
+    presence of the source library. It is disabled only when the index is empty,
+    unavailable, or a sync is in progress. A missing/empty source library with a
+    preserved non-empty index still allows generation (the index may be stale,
+    which the UI warns about separately). An infrastructure failure is never
+    surfaced downstream as "no relevant evidence found".
     """
-    if library_state in ("index_unavailable", "missing_library", "empty_index", "indexing"):
+    if library_state in ("index_unavailable", "empty_index", "indexing"):
         return False
     return bool(chunk_count and chunk_count > 0)
 
@@ -254,11 +277,13 @@ with st.sidebar:
     # the library directory is missing/unreadable.
     source_document_count = _count_source_documents(os.path.abspath(CAPABILITY_LIBRARY_PATH))
 
-    # Read the manifest that sits BESIDE the active index for indexed-document
-    # count and the last successful index timestamp. We only READ it here.
+    # Read the manifest that sits BESIDE the active index. We only READ it here:
+    # indexed-document count, last successful timestamp, the recorded run status,
+    # and the failed-document count so the UI reflects what actually happened.
     indexed_document_count = None
     last_indexed_display = "Never"
     manifest_status = None
+    manifest_failed_total = 0
     try:
         import json
         from chroma_client import manifest_path as _manifest_path
@@ -268,6 +293,8 @@ with st.sidebar:
                 manifest = json.load(f)
             indexed_document_count = manifest.get("indexed_documents_total")
             last_indexed_display = manifest.get("last_successful_index_at") or "Unknown"
+            manifest_status = manifest.get("status")
+            manifest_failed_total = manifest.get("failed_documents_total", 0) or 0
     except Exception:
         last_indexed_display = "Unknown"
 
@@ -310,16 +337,27 @@ with st.sidebar:
     )
     if library_state == "index_unavailable":
         st.error("Search index is unavailable. Document generation is disabled.")
-    elif library_state == "missing_library":
-        st.warning(MISSING_LIBRARY_MESSAGE)
     elif library_state == "empty_index":
         st.warning(
             "Search index is empty. Document generation is disabled until the "
             "library is indexed."
         )
+    elif library_state == "missing_library":
+        # Source library is missing/empty but a non-empty index remains: updates
+        # are unavailable and the index may be stale, but generation continues on
+        # the preserved index (blocker 7 — copy must match actual behavior).
+        st.warning(STALE_INDEX_MESSAGE)
     elif library_state == "recovery":
         # Approved exact wording; no filesystem paths exposed.
         st.warning(RECOVERY_WARNING_MESSAGE)
+
+    # Partial-success signal read from the manifest (blocker 6): show a concise
+    # count of failed documents without raw exception text or filesystem paths.
+    if manifest_status == "partial_success" and manifest_failed_total > 0:
+        st.warning(
+            "Last update completed with {} document(s) that could not be "
+            "indexed.".format(manifest_failed_total)
+        )
 
     st.caption(f"Last indexed: {last_indexed_display}")
 
@@ -338,6 +376,19 @@ with st.sidebar:
                         "Update could not run: {}".format(
                             summary.get("error") or "index or library unavailable"
                         )
+                    )
+                elif status == "source_library_empty":
+                    st.warning(
+                        "No source documents are present. The existing search "
+                        "index was preserved and left unchanged."
+                    )
+                elif status == "manifest_write_failed":
+                    # Indexing may have changed Chroma but status could not be
+                    # published; surface an explicit infrastructure error rather
+                    # than reporting a normal success.
+                    st.error(
+                        "Indexing ran but the index status could not be saved. "
+                        "Please retry; the reported status may be stale."
                     )
                 else:
                     msg = (
@@ -525,14 +576,16 @@ if confirmed_tor_data:
 
 st.subheader("Step 3: Generate Capability Statement")
 
-# Guard conditions. Generation depends on searchable evidence (chunks), not on
-# a document count. An unavailable index (chunk_count is None) also blocks
-# generation and must never be presented as "no relevant evidence found".
+# Guard conditions. Generation depends on searchable evidence (a non-empty
+# index), not on the source-document count. We route the index decision through
+# _document_generation_enabled(library_state, chunk_count) so the UI copy below
+# and the button's enabled state cannot disagree (blocker 7).
 searchable_chunks = chunk_count if isinstance(chunk_count, int) else 0
+index_allows_generation = _document_generation_enabled(library_state, chunk_count)
 can_generate = _can_generate(
     api_key_missing=api_key_missing,
     tor_data=confirmed_tor_data,
-    doc_count=searchable_chunks,
+    doc_count=searchable_chunks if index_allows_generation else 0,
     retrieval_unavailable=st.session_state.get("retrieval_unavailable", False),
 )
 
@@ -540,12 +593,12 @@ if api_key_missing:
     st.warning("Cannot generate: API key is missing.")
 if confirmed_tor_data is None:
     st.info("Please upload a ToR document and confirm your selections first.")
-if chunk_count is None:
+if library_state == "index_unavailable":
     st.warning(
         "⚠️ The search index is unavailable, so document generation is disabled. "
         "This is an infrastructure issue, not an absence of relevant evidence."
     )
-elif chunk_count == 0:
+elif library_state == "empty_index":
     st.warning(
         "⚠️ The search index is empty. "
         "Click 'Update Library' in the sidebar to index your documents."
