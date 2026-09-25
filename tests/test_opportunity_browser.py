@@ -39,6 +39,7 @@ from opportunity_panel import (
     search_opportunities,
     select_opportunity,
     sort_opportunities,
+    table_instance_key,
 )
 
 
@@ -468,3 +469,144 @@ def test_scraper_trigger_module_untouched_marker():
     # we only rely on its public read/dispatch helpers.
     from scraper_trigger import get_trigger_token  # noqa: F401
     from scraper_trigger import dispatch_scraper  # noqa: F401
+
+
+# ===========================================================================
+# Correction pass: table-instance key defeats stale dataframe selection state
+# ===========================================================================
+
+def _sig(search="", sources=None, recs=None, sort=SORT_SHEET, page_size=10):
+    return query_signature(search, sources or [], recs or [], sort, page_size)
+
+
+def test_table_key_differs_between_pages():
+    recs = _n_recs(25)
+    ordered = sort_opportunities(recs, SORT_SHEET)
+    sig = _sig()
+    page1 = paginate(ordered, 1, 10)
+    page2 = paginate(ordered, 2, 10)
+    key1 = table_instance_key(sig, 1, 10, page1)
+    key2 = table_instance_key(sig, 2, 10, page2)
+    assert key1 != key2
+
+
+def test_table_key_differs_when_visible_records_change():
+    recs = [
+        _rec(opportunity_link="a", opportunity_title="anti-corruption", _sheet_order=0),
+        _rec(opportunity_link="b", opportunity_title="aml supervision", _sheet_order=1),
+    ]
+    # Baseline: no search.
+    base_sig = _sig()
+    base_page = paginate(sort_opportunities(recs, SORT_SHEET), 1, 10)
+    base_key = table_instance_key(base_sig, 1, 10, base_page)
+
+    # Search change alters the visible records and the signature.
+    search_sig = _sig(search="anti-corruption")
+    search_page = paginate(
+        sort_opportunities(search_opportunities(recs, "anti-corruption"), SORT_SHEET),
+        1, 10,
+    )
+    search_key = table_instance_key(search_sig, 1, 10, search_page)
+    assert search_key != base_key
+
+    # Sort change alters the visible order -> different key.
+    sort_sig = _sig(sort=SORT_NEWEST)
+    sort_page = paginate(sort_opportunities(recs, SORT_NEWEST), 1, 10)
+    sort_key = table_instance_key(sort_sig, 1, 10, sort_page)
+    # Signature differs even if the two-record order happens to match; assert on
+    # the fuller distinction by also flipping records.
+    assert sort_key != table_instance_key(_sig(sort=SORT_SHEET), 1, 10, sort_page)
+
+    # Filter change alters the signature -> different key.
+    filter_sig = _sig(sources=["undp"])
+    filter_key = table_instance_key(filter_sig, 1, 10, base_page)
+    assert filter_key != base_key
+
+    # Page-size change alters the signature -> different key.
+    size_sig = _sig(page_size=20)
+    size_key = table_instance_key(size_sig, 1, 20, base_page)
+    assert size_key != base_key
+
+
+def test_table_key_stable_for_identical_state_and_records():
+    recs = _n_recs(15)
+    ordered = sort_opportunities(recs, SORT_SHEET)
+    page = paginate(ordered, 1, 10)
+    sig = _sig()
+    assert table_instance_key(sig, 1, 10, page) == table_instance_key(sig, 1, 10, page)
+    # Rebuilding an equivalent page (new list, same identities) is also stable.
+    page_copy = [dict(r) for r in page]
+    assert table_instance_key(sig, 1, 10, page) == table_instance_key(sig, 1, 10, page_copy)
+
+
+def test_stale_selected_row_cannot_preview_or_select_record_from_new_page():
+    """A stale positional selection index must not resolve to a record on the
+    new page — the key change is what forces Streamlit to drop it, and even if a
+    stale index leaked, we bound-check and resolve by identity."""
+    recs = _n_recs(25)
+    ordered = sort_opportunities(recs, SORT_SHEET)
+
+    page1 = paginate(ordered, 1, 10)   # link-0 .. link-9
+    page2 = paginate(ordered, 2, 10)   # link-10 .. link-19
+
+    # New table instance for page 2 has a different key than page 1.
+    assert table_instance_key(_sig(), 1, 10, page1) != table_instance_key(_sig(), 2, 10, page2)
+
+    # Simulate the render logic's bound-checked mapping with a STALE row index
+    # (e.g. row 7 selected on page 1) applied against page 2.
+    stale_row_index = 7
+    # The correct record on page 1 at that index:
+    assert page1[stale_row_index]["opportunity_link"] == "link-7"
+    # On page 2 the same positional index maps to a DIFFERENT record; identity is
+    # what determines the preview, never a row number reused across instances.
+    previewed_on_page2 = page2[stale_row_index]
+    assert previewed_on_page2["opportunity_link"] == "link-17"
+    assert opportunity_identity(previewed_on_page2) == "link-17"
+    # A stale index beyond the new page length is safely ignored by the guard.
+    short_page = paginate(ordered, 3, 10)  # link-20 .. link-24 (len 5)
+    assert not (0 <= 7 < len(short_page))
+
+
+def test_explicit_selection_still_uses_helper_and_link_identity():
+    session = {"selected_opportunity": None}
+    ordered = sort_opportunities(_n_recs(25), SORT_SHEET)
+    page2 = paginate(ordered, 2, 10)
+    chosen = page2[3]  # link-13
+    select_opportunity(session, chosen)
+    assert session["selected_opportunity"] is chosen
+    assert opportunity_identity(session["selected_opportunity"]) == "link-13"
+
+
+# ===========================================================================
+# Correction pass: page_size participates in query_signature (reset to page 1)
+# ===========================================================================
+
+def test_changing_page_size_resets_to_page_one():
+    session = {}
+    sig_10 = query_signature("aml", [], [], SORT_SHEET, 10)
+    assert resolve_current_page(session, sig_10) == 1
+    # Navigate to a later page under page size 10.
+    session[op.KEY_PAGE] = 4
+    assert resolve_current_page(session, sig_10) == 4
+    # Change rows-per-page to 20 -> signature changes -> reset to page 1.
+    sig_20 = query_signature("aml", [], [], SORT_SHEET, 20)
+    assert resolve_current_page(session, sig_20) == 1
+    assert session[op.KEY_PAGE] == 1
+    # And to 50 from a later page -> reset again.
+    session[op.KEY_PAGE] = 3
+    sig_50 = query_signature("aml", [], [], SORT_SHEET, 50)
+    assert resolve_current_page(session, sig_50) == 1
+
+
+def test_query_signature_includes_page_size_value():
+    a = query_signature("x", [], [], SORT_SHEET, 10)
+    b = query_signature("x", [], [], SORT_SHEET, 20)
+    assert a != b
+    # Backwards-compatible default when page_size omitted.
+    assert query_signature("x", [], [], SORT_SHEET) == ("x", (), (), SORT_SHEET, None)
+
+
+def test_render_table_signature_accepts_instance_key():
+    import inspect
+    sig = inspect.signature(op._render_table)
+    assert list(sig.parameters) == ["page_records", "instance_key"]

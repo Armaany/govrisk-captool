@@ -587,6 +587,26 @@ def find_by_identity(opportunities: list[dict], identity: str) -> dict | None:
     return None
 
 
+def table_instance_key(signature: tuple, page: int, page_size, page_records) -> str:
+    """Return a deterministic Streamlit widget key for the current table instance.
+
+    Streamlit keeps ``st.dataframe`` selection state keyed by widget key. A
+    CONSTANT key would let a positional row selection survive when the underlying
+    records change (pagination, search, filter, sort, or page-size changes),
+    previewing/selecting the wrong record. By folding the query signature, page,
+    page size, and the ordered visible ``opportunity_link`` identities into the
+    key, any change to the visible page yields a NEW widget key — so the new page
+    renders with no stale selection.
+
+    Pure and deterministic: identical state + identical records give the same
+    key; any change gives a different key.
+    """
+    identities = tuple(opportunity_identity(o) for o in (page_records or []))
+    material = repr((signature, page, page_size, identities))
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+    return "opp_browser_table_{}".format(digest)
+
+
 # Namespaced session-state keys for the browser (avoid clashing with app keys).
 NS = "opp_browser_"
 KEY_VIEW = NS + "view"
@@ -600,13 +620,21 @@ KEY_PREVIEW = NS + "preview_identity"
 KEY_QUERY_SIGNATURE = NS + "query_signature"
 
 
-def query_signature(search: str, sources, recommendations, sort_mode: str) -> tuple:
-    """A hashable signature of the inputs that must reset pagination to page 1."""
+def query_signature(
+    search: str, sources, recommendations, sort_mode: str, page_size=None
+) -> tuple:
+    """A hashable signature of the inputs that must reset pagination to page 1.
+
+    ``page_size`` participates so that changing Rows per page resets pagination
+    to page 1 (the visible window changes, so a stale later page is meaningless).
+    It is optional for backwards compatibility with existing callers/tests.
+    """
     return (
         (search or "").strip().casefold(),
         tuple(sorted(sources or [])),
         tuple(sorted(recommendations or [])),
         sort_mode or "",
+        page_size,
     )
 
 
@@ -818,7 +846,7 @@ def render_opportunity_panel() -> dict | None:
 
     # --- Pagination page resolution (reset to 1 on query change) -----------
     signature = query_signature(
-        search, selected_sources, selected_recommendations, sort_mode
+        search, selected_sources, selected_recommendations, sort_mode, page_size
     )
     current_page = resolve_current_page(st.session_state, signature)
     current_page = clamp_page(current_page, total_filtered, page_size)
@@ -846,7 +874,12 @@ def render_opportunity_panel() -> dict | None:
                 with column:
                     _render_card(opportunity)
     else:
-        _render_table(page_records)
+        # A deterministic, content-derived key ensures a changed page starts
+        # without a stale positional selection carried over by Streamlit.
+        instance_key = table_instance_key(
+            signature, current_page, page_size, page_records
+        )
+        _render_table(page_records, instance_key)
 
     # --- Pagination controls ----------------------------------------------
     prev_col, label_col, next_col = st.columns([1, 2, 1])
@@ -870,8 +903,13 @@ def render_opportunity_panel() -> dict | None:
     return _render_selection_footer()
 
 
-def _render_table(page_records: list[dict]) -> None:
-    """Render the compact read-only table with native single-row selection."""
+def _render_table(page_records: list[dict], instance_key: str) -> None:
+    """Render the compact read-only table with native single-row selection.
+
+    ``instance_key`` must uniquely identify the current visible page/query so a
+    stale positional selection from a previous table instance cannot leak into a
+    changed page.
+    """
     import pandas as pd
 
     rows = build_table_rows(page_records)
@@ -903,7 +941,7 @@ def _render_table(page_records: list[dict]) -> None:
                 "Open", display_text="Open ↗", width="small"
             ),
         },
-        key="opp_browser_table",
+        key=instance_key,
     )
 
     # Map the selected visible row back to its record by stable identity.
