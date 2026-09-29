@@ -438,6 +438,15 @@ def test_open_action_is_visible_before_wide_detail_columns():
     assert TABLE_COLUMNS[:3] == ("Source", "Open", "Opportunity")
 
 
+def test_source_open_and_opportunity_columns_are_pinned_together():
+    path = os.path.join(os.path.dirname(__file__), "..", "opportunity_panel.py")
+    with open(path, encoding="utf-8") as handle:
+        src = handle.read()
+    assert '"Source", width="small", pinned=True' in src
+    assert '"Open",\n                display_text="Open ↗"' in src
+    assert '"Opportunity", width="large", pinned=True' in src
+
+
 def test_safe_opportunity_url_accepts_only_absolute_http_links():
     assert safe_opportunity_url(" https://example.test/opportunity/1 ") == (
         "https://example.test/opportunity/1"

@@ -981,7 +981,9 @@ def _render_table(page_records: list[dict], instance_key: str) -> None:
                 pinned=True,
                 help="Open the original opportunity in a new tab.",
             ),
-            "Opportunity": st.column_config.TextColumn("Opportunity", width="large"),
+            "Opportunity": st.column_config.TextColumn(
+                "Opportunity", width="large", pinned=True
+            ),
             "Funder": st.column_config.TextColumn("Funder", width="medium"),
             "Geography": st.column_config.TextColumn("Geography", width="small"),
             "Discovery week": st.column_config.TextColumn(
