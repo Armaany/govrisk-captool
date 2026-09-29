@@ -409,10 +409,9 @@ def test_missing_or_malformed_fields_do_not_crash_table_rows():
     assert row["Relevance"] == "Unavailable"
     assert row["Recommendation"] == "Not assessed"
     assert row["Matched keywords"] == ""
-    assert row["Open"] == "https://example.test/x"
     # A completely empty dict must not raise.
     empty = build_table_row({})
-    assert empty["Open"] is None
+    assert tuple(empty.keys()) == TABLE_COLUMNS
 
 
 def test_table_rows_never_expose_internal_fields():
@@ -423,27 +422,27 @@ def test_table_rows_never_expose_internal_fields():
     assert tuple(row.keys()) == TABLE_COLUMNS
 
 
-def test_link_column_is_configured_in_source():
+def test_table_selection_drives_native_preview_actions():
     path = os.path.join(os.path.dirname(__file__), "..", "opportunity_panel.py")
     with open(path, encoding="utf-8") as handle:
         src = handle.read()
-    assert "st.column_config.LinkColumn" in src
+    assert "st.column_config.LinkColumn" not in src
     assert 'on_select="rerun"' in src
     assert 'selection_mode="single-row"' in src
-    assert '"Open",\n                display_text="Open ↗"' in src
-    assert 'pinned=True' in src
+    assert "Select a row to preview it, open the original opportunity" in src
+    assert 'st.link_button("Open opportunity ↗", link)' in src
 
 
-def test_open_action_is_visible_before_wide_detail_columns():
-    assert TABLE_COLUMNS[:3] == ("Source", "Open", "Opportunity")
+def test_identifying_columns_are_visible_before_wide_detail_columns():
+    assert TABLE_COLUMNS[:2] == ("Source", "Opportunity")
+    assert "Open" not in TABLE_COLUMNS
 
 
-def test_source_open_and_opportunity_columns_are_pinned_together():
+def test_source_and_opportunity_columns_are_pinned_together():
     path = os.path.join(os.path.dirname(__file__), "..", "opportunity_panel.py")
     with open(path, encoding="utf-8") as handle:
         src = handle.read()
     assert '"Source", width="small", pinned=True' in src
-    assert '"Open",\n                display_text="Open ↗"' in src
     assert '"Opportunity", width="large", pinned=True' in src
 
 
@@ -488,7 +487,8 @@ def test_all_opportunity_views_use_the_same_safe_link_helper():
     path = os.path.join(os.path.dirname(__file__), "..", "opportunity_panel.py")
     with open(path, encoding="utf-8") as handle:
         src = handle.read()
-    assert src.count("safe_opportunity_url(opportunity.get") == 3
+    assert src.count("safe_opportunity_url(opportunity.get") == 2
+    assert "Open opportunity ↗" in src
     assert "Open selected opportunity ↗" in src
 
 

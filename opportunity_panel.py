@@ -393,7 +393,6 @@ NO_RESULTS_MESSAGE = "No opportunities match your search and filters."
 # Ordered, user-facing table columns (no internal fields are ever included).
 TABLE_COLUMNS = (
     "Source",
-    "Open",
     "Opportunity",
     "Funder",
     "Geography",
@@ -600,7 +599,6 @@ def build_table_row(opportunity: dict) -> dict:
     keywords = deduplicate_keywords(opportunity.get("matched_keywords_list"))
     return {
         "Source": (opportunity.get("portal_source") or "").strip() or "Unknown source",
-        "Open": safe_opportunity_url(opportunity.get("opportunity_link")),
         "Opportunity": (opportunity.get("opportunity_title") or "").strip()
         or "Untitled opportunity",
         "Funder": (opportunity.get("funder_organisation") or "").strip()
@@ -964,6 +962,11 @@ def _render_table(page_records: list[dict], instance_key: str) -> None:
     rows = build_table_rows(page_records)
     frame = pd.DataFrame(rows, columns=TABLE_COLUMNS)
 
+    st.caption(
+        "Select a row to preview it, open the original opportunity, or prepare "
+        "a capability statement."
+    )
+
     event = st.dataframe(
         frame,
         hide_index=True,
@@ -973,13 +976,6 @@ def _render_table(page_records: list[dict], instance_key: str) -> None:
         column_config={
             "Source": st.column_config.TextColumn(
                 "Source", width="small", pinned=True
-            ),
-            "Open": st.column_config.LinkColumn(
-                "Open",
-                display_text="Open ↗",
-                width="small",
-                pinned=True,
-                help="Open the original opportunity in a new tab.",
             ),
             "Opportunity": st.column_config.TextColumn(
                 "Opportunity", width="large", pinned=True
