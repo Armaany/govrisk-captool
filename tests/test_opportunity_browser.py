@@ -23,6 +23,7 @@ from opportunity_panel import (
     VIEW_OPTIONS,
     VIEW_TABLE,
     build_table_row,
+    cache_busted_csv_url,
     build_table_rows,
     clamp_page,
     filter_opportunities,
@@ -452,6 +453,26 @@ def test_safe_opportunity_url_accepts_only_absolute_http_links():
         "https://example.test/path\nInjected",
     ):
         assert safe_opportunity_url(unsafe) is None
+
+
+def test_explicit_refresh_token_bypasses_upstream_csv_cache():
+    base = "https://example.test/export?tqx=out:csv&sheet=Opportunities"
+    refreshed = cache_busted_csv_url(base, "abc123")
+    assert refreshed == base + "&_refresh=abc123"
+    assert cache_busted_csv_url(base) == base
+    assert cache_busted_csv_url("https://example.test/export", "xyz") == (
+        "https://example.test/export?_refresh=xyz"
+    )
+
+
+def test_refresh_control_rotates_token_before_rerun():
+    path = os.path.join(os.path.dirname(__file__), "..", "opportunity_panel.py")
+    with open(path, encoding="utf-8") as handle:
+        src = handle.read()
+    assignment = 'st.session_state[RESULTS_REFRESH_KEY] = uuid.uuid4().hex'
+    assert assignment in src
+    assert src.index(assignment) < src.index("_download_csv_text.clear()")
+    assert "refresh_token=st.session_state.get(RESULTS_REFRESH_KEY" in src
 
 
 def test_all_opportunity_views_use_the_same_safe_link_helper():

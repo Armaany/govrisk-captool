@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import json
+import uuid
 from collections import OrderedDict
 from datetime import date, datetime, timezone
 from urllib.parse import urlsplit
@@ -22,6 +23,7 @@ SHEET_CSV_URL = (
     f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq"
     f"?tqx=out:csv&sheet={SHEET_TAB}"
 )
+RESULTS_REFRESH_KEY = "opportunity_results_refresh_token"
 
 REQUIRED_HEADERS = (
     "portal_source",
@@ -238,16 +240,36 @@ def parse_opportunities_csv(csv_text: str) -> list[dict]:
     return opportunities
 
 
+def cache_busted_csv_url(csv_url: str, refresh_token: str = "") -> str:
+    """Return a refresh-specific URL without changing the Sheet query.
+
+    Clearing Streamlit's cache does not guarantee that an upstream HTTP cache
+    will revalidate Google's ``gviz`` CSV response.  A per-click token is an
+    ignored query parameter that gives an explicit refresh a distinct URL.
+    """
+    token = str(refresh_token or "").strip()
+    if not token:
+        return csv_url
+    separator = "&" if "?" in csv_url else "?"
+    return f"{csv_url}{separator}_refresh={token}"
+
+
 @st.cache_data(ttl=120, show_spinner=False)
-def _download_csv_text(csv_url: str) -> str:
-    request = Request(csv_url, headers={"User-Agent": "GovRisk-Captool/1.0"})
+def _download_csv_text(csv_url: str, refresh_token: str = "") -> str:
+    request = Request(
+        cache_busted_csv_url(csv_url, refresh_token),
+        headers={"User-Agent": "GovRisk-Captool/1.0"},
+    )
     with urlopen(request, timeout=20) as response:
         return response.read().decode("utf-8-sig")
 
 
-def fetch_opportunities(csv_url: str = SHEET_CSV_URL) -> list[dict]:
+def fetch_opportunities(
+    csv_url: str = SHEET_CSV_URL,
+    refresh_token: str = "",
+) -> list[dict]:
     """Fetch and parse the live read-only Sheet export."""
-    return parse_opportunities_csv(_download_csv_text(csv_url))
+    return parse_opportunities_csv(_download_csv_text(csv_url, refresh_token))
 
 
 def filter_opportunities(
@@ -788,11 +810,16 @@ def render_opportunity_panel() -> dict | None:
         refresh_col, status_col = st.columns([1, 3])
     with refresh_col:
         if st.button("Refresh results", use_container_width=True):
+            st.session_state[RESULTS_REFRESH_KEY] = uuid.uuid4().hex
             _download_csv_text.clear()
             st.rerun()
 
     try:
-        opportunities = deduplicate_opportunities(fetch_opportunities())
+        opportunities = deduplicate_opportunities(
+            fetch_opportunities(
+                refresh_token=st.session_state.get(RESULTS_REFRESH_KEY, "")
+            )
+        )
     except OpportunitySchemaError as exc:
         st.error(str(exc))
         return get_selected_opportunity(st.session_state)
