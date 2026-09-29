@@ -8,6 +8,7 @@ import io
 import json
 from collections import OrderedDict
 from datetime import date, datetime, timezone
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 import streamlit as st
@@ -161,6 +162,27 @@ def deduplicate_keywords(keywords) -> list[str]:
         seen.add(key)
         result.append(text)
     return result
+
+
+def safe_opportunity_url(value) -> str | None:
+    """Return a browser-safe HTTP(S) opportunity URL, or ``None``.
+
+    Sheet cells are external input.  Restrict rendered links to absolute HTTP
+    and HTTPS URLs so malformed, relative, or active-content schemes cannot be
+    emitted through either the table or card views.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or any(ord(character) < 32 for character in text):
+        return None
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return None
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
+        return None
+    return text
 
 SELECTED_OPPORTUNITY_KEY = "selected_opportunity"
 
@@ -349,6 +371,7 @@ NO_RESULTS_MESSAGE = "No opportunities match your search and filters."
 # Ordered, user-facing table columns (no internal fields are ever included).
 TABLE_COLUMNS = (
     "Source",
+    "Open",
     "Opportunity",
     "Funder",
     "Geography",
@@ -357,7 +380,6 @@ TABLE_COLUMNS = (
     "Relevance",
     "Recommendation",
     "Matched keywords",
-    "Open",
 )
 
 
@@ -556,6 +578,7 @@ def build_table_row(opportunity: dict) -> dict:
     keywords = deduplicate_keywords(opportunity.get("matched_keywords_list"))
     return {
         "Source": (opportunity.get("portal_source") or "").strip() or "Unknown source",
+        "Open": safe_opportunity_url(opportunity.get("opportunity_link")),
         "Opportunity": (opportunity.get("opportunity_title") or "").strip()
         or "Untitled opportunity",
         "Funder": (opportunity.get("funder_organisation") or "").strip()
@@ -568,7 +591,6 @@ def build_table_row(opportunity: dict) -> dict:
         "Recommendation": (opportunity.get("bid_recommendation") or "").strip()
         or "Not assessed",
         "Matched keywords": " · ".join(keywords) if keywords else "",
-        "Open": (opportunity.get("opportunity_link") or "").strip() or None,
     }
 
 
@@ -676,7 +698,7 @@ def _render_card(opportunity: dict) -> None:
         else:
             st.caption("Matched keywords unavailable for this historical record")
 
-        link = opportunity.get("opportunity_link")
+        link = safe_opportunity_url(opportunity.get("opportunity_link"))
         action_columns = st.columns(2)
         with action_columns[0]:
             if link:
@@ -725,7 +747,7 @@ def _render_preview(opportunity: dict) -> None:
         if summary:
             st.write(summary)
 
-        link = opportunity.get("opportunity_link")
+        link = safe_opportunity_url(opportunity.get("opportunity_link"))
         if link:
             st.link_button("Open opportunity ↗", link)
 
@@ -922,7 +944,16 @@ def _render_table(page_records: list[dict], instance_key: str) -> None:
         on_select="rerun",
         selection_mode="single-row",
         column_config={
-            "Source": st.column_config.TextColumn("Source", width="small"),
+            "Source": st.column_config.TextColumn(
+                "Source", width="small", pinned=True
+            ),
+            "Open": st.column_config.LinkColumn(
+                "Open",
+                display_text="Open ↗",
+                width="small",
+                pinned=True,
+                help="Open the original opportunity in a new tab.",
+            ),
             "Opportunity": st.column_config.TextColumn("Opportunity", width="large"),
             "Funder": st.column_config.TextColumn("Funder", width="medium"),
             "Geography": st.column_config.TextColumn("Geography", width="small"),
@@ -936,9 +967,6 @@ def _render_table(page_records: list[dict], instance_key: str) -> None:
             ),
             "Matched keywords": st.column_config.TextColumn(
                 "Matched keywords", width="medium"
-            ),
-            "Open": st.column_config.LinkColumn(
-                "Open", display_text="Open ↗", width="small"
             ),
         },
         key=instance_key,
@@ -969,7 +997,21 @@ def _render_selection_footer() -> dict | None:
             f"Opportunity selected: {title}. Open the opportunity, download the "
             "ToR, then upload it below to begin."
         )
-        if st.button("Change or clear selection", key="clear_selected_opportunity"):
-            clear_selected_opportunity(st.session_state)
-            st.rerun()
+        selected_link = safe_opportunity_url(selected.get("opportunity_link"))
+        open_col, clear_col = st.columns(2)
+        with open_col:
+            if selected_link:
+                st.link_button(
+                    "Open selected opportunity ↗",
+                    selected_link,
+                    use_container_width=True,
+                )
+        with clear_col:
+            if st.button(
+                "Change or clear selection",
+                key="clear_selected_opportunity",
+                use_container_width=True,
+            ):
+                clear_selected_opportunity(st.session_state)
+                st.rerun()
     return selected

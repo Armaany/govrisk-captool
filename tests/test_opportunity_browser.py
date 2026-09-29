@@ -36,6 +36,7 @@ from opportunity_panel import (
     paginate,
     query_signature,
     resolve_current_page,
+    safe_opportunity_url,
     search_opportunities,
     select_opportunity,
     sort_opportunities,
@@ -428,6 +429,37 @@ def test_link_column_is_configured_in_source():
     assert "st.column_config.LinkColumn" in src
     assert 'on_select="rerun"' in src
     assert 'selection_mode="single-row"' in src
+    assert '"Open",\n                display_text="Open ↗"' in src
+    assert 'pinned=True' in src
+
+
+def test_open_action_is_visible_before_wide_detail_columns():
+    assert TABLE_COLUMNS[:3] == ("Source", "Open", "Opportunity")
+
+
+def test_safe_opportunity_url_accepts_only_absolute_http_links():
+    assert safe_opportunity_url(" https://example.test/opportunity/1 ") == (
+        "https://example.test/opportunity/1"
+    )
+    assert safe_opportunity_url("http://example.test/x") == "http://example.test/x"
+    for unsafe in (
+        "",
+        None,
+        "/relative/path",
+        "//example.test/path",
+        "javascript:alert(1)",
+        "file:///tmp/secret",
+        "https://example.test/path\nInjected",
+    ):
+        assert safe_opportunity_url(unsafe) is None
+
+
+def test_all_opportunity_views_use_the_same_safe_link_helper():
+    path = os.path.join(os.path.dirname(__file__), "..", "opportunity_panel.py")
+    with open(path, encoding="utf-8") as handle:
+        src = handle.read()
+    assert src.count("safe_opportunity_url(opportunity.get") == 3
+    assert "Open selected opportunity ↗" in src
 
 
 def test_default_view_is_table():
