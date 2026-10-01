@@ -46,6 +46,7 @@ def local_folder_workspace(
     display_name: str,
     source_path: str,
     workspace_root: str = "./evidence_workspaces",
+    source_type: str = "local_folder",
 ) -> EvidenceWorkspace:
     """Build an isolated workspace for a read-only local source folder."""
     stable_id = validate_library_id(library_id)
@@ -58,7 +59,7 @@ def local_folder_workspace(
         source_path=source,
         persist_path=str(persist),
         collection_name=collection_name_for_library(stable_id),
-        source_type="local_folder",
+        source_type=source_type,
     )
 
 

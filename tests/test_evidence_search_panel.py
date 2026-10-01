@@ -1,7 +1,13 @@
 from unittest.mock import MagicMock
 
 import evidence_search_panel
-from evidence_search_panel import SEARCH_UNAVAILABLE_MESSAGE, render_evidence_search_panel
+from evidence_search_panel import (
+    DEFAULT_LIBRARY,
+    SEARCH_UNAVAILABLE_MESSAGE,
+    SESSION_UPLOADS,
+    _safe_upload_failures,
+    render_evidence_search_panel,
+)
 
 
 def _ui(request="India fraud", submit=True):
@@ -9,6 +15,8 @@ def _ui(request="India fraud", submit=True):
     ui.session_state = {}
     ui.text_area.return_value = request
     ui.button.return_value = submit
+    ui.selectbox.return_value = DEFAULT_LIBRARY
+    ui.file_uploader.return_value = []
     ui.columns.return_value = (MagicMock(), MagicMock(), MagicMock())
     return ui
 
@@ -19,7 +27,7 @@ def test_panel_surfaces_infrastructure_failure_without_raw_exception(monkeypatch
     monkeypatch.setattr(
         evidence_search_panel,
         "search_evidence",
-        lambda request: {
+        lambda request, workspace=None: {
             "query": request,
             "library_unavailable": True,
             "library_error": secret_error,
@@ -59,7 +67,9 @@ def test_panel_renders_verified_results_and_download(monkeypatch):
             }
         ],
     }
-    monkeypatch.setattr(evidence_search_panel, "search_evidence", lambda request: result)
+    monkeypatch.setattr(
+        evidence_search_panel, "search_evidence", lambda request, workspace=None: result
+    )
     monkeypatch.setattr(evidence_search_panel, "build_evidence_catalogue_docx", lambda value: b"PKdocx")
 
     returned = render_evidence_search_panel(ui)
@@ -84,3 +94,70 @@ def test_panel_does_not_search_blank_request(monkeypatch):
     assert render_evidence_search_panel(ui) is None
     assert called is False
     ui.warning.assert_called_once_with("Enter an evidence request before searching.")
+
+
+def test_upload_source_requires_preparation_before_search(monkeypatch):
+    ui = _ui()
+    ui.selectbox.return_value = SESSION_UPLOADS
+    # First button is Prepare, second is Search.
+    ui.button.side_effect = [False, True]
+    called = False
+
+    def fake_search(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(evidence_search_panel, "search_evidence", fake_search)
+    assert render_evidence_search_panel(ui) is None
+    assert called is False
+    assert any(
+        "Prepare the uploaded evidence" in str(call)
+        for call in ui.warning.call_args_list
+    )
+
+
+def test_prepared_upload_workspace_is_forwarded_to_search(monkeypatch):
+    ui = _ui()
+    ui.selectbox.return_value = SESSION_UPLOADS
+    ui.button.side_effect = [False, True]
+    workspace = object()
+    ui.session_state["evidence_upload_workspace"] = workspace
+    captured = {}
+
+    def fake_search(request, workspace=None):
+        captured.update(request=request, workspace=workspace)
+        return {"library_unavailable": False, "groups": []}
+
+    monkeypatch.setattr(evidence_search_panel, "search_evidence", fake_search)
+    render_evidence_search_panel(ui)
+    assert captured == {"request": "India fraud", "workspace": workspace}
+
+
+def test_upload_failure_details_ignore_raw_paths_and_exception_text():
+    details = _safe_upload_failures(
+        {
+            "failed_documents": [
+                {
+                    "filename": r"C:\private\Client Report.docx",
+                    "category": "docx_extraction_error",
+                    "reason": "Bearer SENTINEL_SECRET",
+                    "traceback": "SENTINEL_TRACEBACK",
+                },
+                {
+                    "filename": "/private/Unknown.pdf",
+                    "category": "raw_internal_category",
+                },
+            ]
+        }
+    )
+    assert details == [
+        {
+            "document": "Client Report.docx",
+            "reason": "Word document extraction failed",
+        },
+        {"document": "Unknown.pdf", "reason": "Indexing failed"},
+    ]
+    rendered = str(details)
+    assert "private" not in rendered
+    assert "SENTINEL" not in rendered
+    assert "raw_internal_category" not in rendered

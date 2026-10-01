@@ -179,6 +179,15 @@ not merged or deployed:
   configuration. Synchronisation, manifests, and retrieval therefore stay
   inside the selected workspace instead of treating another library's files as
   removed.
+- `document_source.py` implements both the existing read-only local folder and
+  temporary session PDF/DOCX uploads. Uploads are limited to 20 documents, 25 MB
+  per document, and 100 MB total; filenames are path-stripped and validated
+  before any write. The generated `evidence_workspaces/` tree is ignored by Git
+  so client documents cannot be staged accidentally.
+- The Evidence Search panel offers either the established GovRisk library or an
+  isolated temporary upload workspace. Uploads must be prepared/indexed before
+  search, changing source never displays results from the previously selected
+  source, and infrastructure exceptions are not rendered to the user.
 - Focused evidence/app tests pass. Existing Chroma tests that require pytest's
   Windows temporary-directory fixture are blocked in this environment by the
   pre-existing temp-folder ACL problem; the retriever tests that do not require
@@ -198,17 +207,21 @@ Every returned packet carried the expected `library_id`, a non-empty
 and deterministic quote gate, not exhaustive recall: the current retriever is
 still vector-only and limited to the configured top-k.
 
+A separate real session-upload acceptance run generated a DOCX in memory,
+materialised it through the upload adapter, and synchronised it into a new
+isolated collection. It reported `ready`, one indexed source document, two
+stored chunks, and zero failures. A free-form search returned one document and
+one exact quote-verified evidence item with the expected session `library_id`
+and safe filename-only `source_id`.
+
 Still pending before this slice is reviewable as a complete MVP:
 
-1. A full `DocumentSource` interface. The local-folder workspace is implemented,
-   but session uploads and Drive still need concrete source adapters.
-2. Wiring workspace selection/synchronisation into the UI. The current panel
-   intentionally searches the historical default library; the isolated
-   workspace was exercised through the backend API only.
-3. Full clean-environment regression verification once the Windows pytest temp
+1. A read-only Google Drive `DocumentSource` adapter. Local-folder and temporary
+   session-upload sources are implemented.
+2. Full clean-environment regression verification once the Windows pytest temp
    ACL problem is repaired.
-4. Prompt-backed structured fact extraction; the current catalogue intentionally
+3. Prompt-backed structured fact extraction; the current catalogue intentionally
    exports exact retrieved excerpts only and therefore cannot invent facts.
-5. Hybrid/expanded retrieval and coverage accounting before claiming that an
+4. Hybrid/expanded retrieval and coverage accounting before claiming that an
    evidence catalogue includes every relevant project.
-6. Session uploads, Google Drive, merge, and deployment.
+5. Google Drive, merge, and deployment.

@@ -1,6 +1,11 @@
 ﻿venv/
 chroma_db/
 output/
+
+# Generated, temporary Evidence Search indexes and uploaded source snapshots.
+# Client documents must never be committed.
+evidence_workspaces/
+.pytest-run-*/
 .env
 __pycache__/
 *.pyc
