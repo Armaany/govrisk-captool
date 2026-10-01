@@ -84,4 +84,3 @@ def test_panel_does_not_search_blank_request(monkeypatch):
     assert render_evidence_search_panel(ui) is None
     assert called is False
     ui.warning.assert_called_once_with("Enter an evidence request before searching.")
-

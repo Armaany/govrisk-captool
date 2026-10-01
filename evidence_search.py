@@ -370,4 +370,3 @@ def build_evidence_catalogue_docx(result: dict) -> bytes:
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()
-

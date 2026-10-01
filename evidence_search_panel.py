@@ -105,4 +105,3 @@ def render_evidence_search_panel(ui) -> dict | None:
         key="evidence_search_download",
     )
     return result
-

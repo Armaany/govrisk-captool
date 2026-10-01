@@ -184,4 +184,3 @@ def test_catalogue_does_not_invent_project_metadata():
     )
     assert "Unknown client" not in text
     assert "Unknown date" not in text
-
