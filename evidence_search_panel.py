@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import uuid
 
+from config import ANTHROPIC_API_KEY
 from document_source import DocumentSourceError, SessionUploadDocumentSource
+from evidence_brief import build_evidence_brief_docx, generate_evidence_brief
 from evidence_search import build_evidence_catalogue_docx, search_evidence
 from evidence_workspace import sync_workspace
 
@@ -32,6 +34,11 @@ SESSION_NOTICE = (
 UPLOAD_PREPARE_FAILED = (
     "The uploaded evidence workspace could not be prepared. The existing "
     "GovRisk library and capability-statement workflow were not changed."
+)
+BRIEF_REVIEW_NOTICE = (
+    "This is AI-assisted synthesis of the verified excerpts returned by this search. "
+    "Every retained project has a checked source/chunk citation, but quote verification "
+    "does not prove the interpretation or exhaustive coverage. Review it before external use."
 )
 UPLOAD_FAILURE_LABELS = {
     "docx_extraction_error": "Word document extraction failed",
@@ -77,6 +84,86 @@ def _initialise_state(state) -> None:
         state["evidence_session_token"] = uuid.uuid4().hex
     if "evidence_upload_workspace" not in state:
         state["evidence_upload_workspace"] = None
+    if "evidence_brief_result" not in state:
+        state["evidence_brief_result"] = None
+    if "evidence_brief_fingerprint" not in state:
+        state["evidence_brief_fingerprint"] = None
+
+
+def _result_fingerprint(result: dict, source_key: str) -> tuple:
+    """Identify the exact retrieval result used to generate a brief."""
+    chunk_ids = []
+    for group in result.get("groups", []) if isinstance(result, dict) else []:
+        if not isinstance(group, dict):
+            continue
+        for packet in group.get("evidence", []) or []:
+            if isinstance(packet, dict):
+                chunk_id = str(packet.get("chunk_id") or "").strip()
+                if chunk_id:
+                    chunk_ids.append(chunk_id)
+    return (source_key, str(result.get("query") or "").strip(), tuple(chunk_ids))
+
+
+def _clear_brief_state(state) -> None:
+    state["evidence_brief_result"] = None
+    state["evidence_brief_fingerprint"] = None
+
+
+def _render_structured_brief(ui, brief: dict) -> None:
+    ui.subheader(str(brief.get("title") or "Structured evidence brief"))
+    ui.warning(BRIEF_REVIEW_NOTICE)
+    if brief.get("executive_summary"):
+        ui.write(brief["executive_summary"])
+
+    for group in brief.get("evidence_groups", []) or []:
+        ui.write(str(group.get("heading") or "Evidence"))
+        for project in group.get("projects", []) or []:
+            label = "{} · {} · {}".format(
+                project.get("project_name") or "Unnamed project",
+                project.get("country_or_region") or "Not stated",
+                project.get("confidence") or "LOW",
+            )
+            with ui.expander(label, expanded=False):
+                ui.write(project.get("capability_evidence") or "No capability summary returned.")
+                if project.get("themes"):
+                    ui.caption("Themes: " + " · ".join(project["themes"]))
+                for reported_result in project.get("reported_results", []) or []:
+                    ui.write("- " + reported_result)
+                if project.get("gaps"):
+                    ui.info("Evidence gaps: " + "; ".join(project["gaps"]))
+                ui.caption("Verified source support")
+                for citation in project.get("citations", []) or []:
+                    ui.write(
+                        "{} — {} — chunk {}".format(
+                            citation.get("source_name") or citation.get("source_id") or "Unknown source",
+                            citation.get("locator_label") or "Document chunk",
+                            citation.get("chunk_id") or "",
+                        )
+                    )
+                    ui.write('"' + str(citation.get("supporting_quote") or "") + '"')
+
+    gaps = brief.get("cross_cutting_gaps", []) or []
+    if gaps:
+        with ui.expander("Gaps and limitations", expanded=True):
+            for gap in gaps:
+                ui.write("- " + gap)
+
+    validation = brief.get("validation", {}) or {}
+    ui.caption(
+        "Retained {} source-supported project(s). Removed {} unsupported project(s) "
+        "and {} invalid citation(s) during deterministic validation.".format(
+            validation.get("projects_retained", 0),
+            validation.get("projects_removed", 0),
+            validation.get("citations_removed", 0),
+        )
+    )
+    ui.download_button(
+        "Download structured evidence brief (.docx)",
+        data=build_evidence_brief_docx(brief),
+        file_name="structured_evidence_brief.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        key="evidence_brief_download",
+    )
 
 
 def _render_source_selector(ui):
@@ -109,6 +196,7 @@ def _render_source_selector(ui):
             else:
                 ui.session_state["evidence_upload_workspace"] = workspace
                 ui.session_state["evidence_search_result"] = None
+                _clear_brief_state(ui.session_state)
                 ui.success(
                     "Uploaded evidence is ready: {} source document(s), {} search chunk(s).".format(
                         summary.get("source_documents_total", 0),
@@ -141,6 +229,7 @@ def _render_source_selector(ui):
 def render_evidence_search_panel(ui) -> dict | None:
     """Render free-form Evidence Search without changing the ToR workflow."""
     _initialise_state(ui.session_state)
+    searched_this_render = False
 
     ui.write(
         "Search the selected evidence source for source-grounded project "
@@ -157,7 +246,9 @@ def render_evidence_search_panel(ui) -> dict | None:
     )
 
     if ui.button("Search evidence", type="primary", key="evidence_search_submit"):
+        searched_this_render = True
         ui.session_state["evidence_search_request"] = request
+        _clear_brief_state(ui.session_state)
         if not str(request or "").strip():
             ui.warning("Enter an evidence request before searching.")
             ui.session_state["evidence_search_result"] = None
@@ -226,4 +317,32 @@ def render_evidence_search_panel(ui) -> dict | None:
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         key="evidence_search_download",
     )
+
+    ui.divider()
+    ui.write("Create a structured, qualified brief from the verified excerpts above.")
+    ui.caption(
+        "The brief presents the best-supported evidence returned by this search; "
+        "it does not claim that every relevant project in the library was found."
+    )
+    fingerprint = _result_fingerprint(result, source_key)
+    if not str(ANTHROPIC_API_KEY or "").strip():
+        ui.info("Add the Anthropic API key to enable structured evidence brief generation.")
+    elif not searched_this_render and ui.button(
+        "Generate structured evidence brief",
+        key="evidence_brief_generate",
+    ):
+        with ui.spinner("Organising verified evidence into a structured brief..."):
+            brief = generate_evidence_brief(result, api_key=ANTHROPIC_API_KEY)
+        ui.session_state["evidence_brief_result"] = brief
+        ui.session_state["evidence_brief_fingerprint"] = fingerprint
+
+    brief = ui.session_state.get("evidence_brief_result")
+    if brief and ui.session_state.get("evidence_brief_fingerprint") == fingerprint:
+        if brief.get("status") == "ready":
+            _render_structured_brief(ui, brief)
+        else:
+            ui.warning(
+                brief.get("message")
+                or "The structured evidence brief could not be generated."
+            )
     return result

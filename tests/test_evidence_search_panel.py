@@ -2,6 +2,7 @@ from unittest.mock import MagicMock
 
 import evidence_search_panel
 from evidence_search_panel import (
+    BRIEF_REVIEW_NOTICE,
     DEFAULT_LIBRARY,
     SEARCH_UNAVAILABLE_MESSAGE,
     SESSION_UPLOADS,
@@ -161,3 +162,97 @@ def test_upload_failure_details_ignore_raw_paths_and_exception_text():
     assert "private" not in rendered
     assert "SENTINEL" not in rendered
     assert "raw_internal_category" not in rendered
+
+
+def test_panel_generates_and_downloads_validated_brief_on_separate_click(monkeypatch):
+    ui = _ui(submit=False)
+    result = {
+        "query": "India fraud",
+        "library_unavailable": False,
+        "documents_found": 1,
+        "verified_evidence": 1,
+        "needs_review": 0,
+        "groups": [
+            {
+                "source_name": "India.docx",
+                "evidence": [
+                    {
+                        "verification_status": "verified",
+                        "chunk_id": "chunk-1",
+                        "quote": "Verified quote.",
+                    }
+                ],
+            }
+        ],
+    }
+    brief = {
+        "status": "ready",
+        "title": "Structured brief",
+        "executive_summary": "One supported project.",
+        "evidence_groups": [],
+        "cross_cutting_gaps": [],
+        "validation": {
+            "projects_retained": 1,
+            "projects_removed": 0,
+            "citations_removed": 0,
+        },
+    }
+    ui.session_state.update(
+        {
+            "evidence_search_result": result,
+            "evidence_search_result_source": DEFAULT_LIBRARY,
+        }
+    )
+    # Search is not clicked; Generate brief is clicked.
+    ui.button.side_effect = [False, True]
+    monkeypatch.setattr(evidence_search_panel, "ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(evidence_search_panel, "generate_evidence_brief", lambda *a, **k: brief)
+    monkeypatch.setattr(evidence_search_panel, "build_evidence_catalogue_docx", lambda value: b"PKcatalogue")
+    monkeypatch.setattr(evidence_search_panel, "build_evidence_brief_docx", lambda value: b"PKbrief")
+
+    returned = render_evidence_search_panel(ui)
+
+    assert returned is result
+    assert ui.session_state["evidence_brief_result"] is brief
+    downloads = [call.kwargs for call in ui.download_button.call_args_list]
+    assert [item["file_name"] for item in downloads] == [
+        "evidence_catalogue.docx",
+        "structured_evidence_brief.docx",
+    ]
+    rendered = " ".join(str(call) for call in ui.method_calls)
+    assert BRIEF_REVIEW_NOTICE in rendered
+
+
+def test_panel_hides_raw_generation_error(monkeypatch):
+    ui = _ui(submit=False)
+    result = {
+        "query": "India fraud",
+        "library_unavailable": False,
+        "documents_found": 1,
+        "verified_evidence": 1,
+        "needs_review": 0,
+        "groups": [{"source_name": "India.docx", "evidence": [{"chunk_id": "c1"}]}],
+    }
+    ui.session_state.update(
+        {
+            "evidence_search_result": result,
+            "evidence_search_result_source": DEFAULT_LIBRARY,
+        }
+    )
+    ui.button.side_effect = [False, True]
+    monkeypatch.setattr(evidence_search_panel, "ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(
+        evidence_search_panel,
+        "generate_evidence_brief",
+        lambda *a, **k: {
+            "status": "error",
+            "message": "The structured evidence brief could not be generated.",
+        },
+    )
+    monkeypatch.setattr(evidence_search_panel, "build_evidence_catalogue_docx", lambda value: b"PKcatalogue")
+
+    render_evidence_search_panel(ui)
+
+    rendered = " ".join(str(call) for call in ui.method_calls)
+    assert "SENTINEL_SECRET" not in rendered
+    assert "could not be generated" in rendered

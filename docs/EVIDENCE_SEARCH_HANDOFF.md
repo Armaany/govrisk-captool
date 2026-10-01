@@ -220,8 +220,37 @@ Still pending before this slice is reviewable as a complete MVP:
    session-upload sources are implemented.
 2. Full clean-environment regression verification once the Windows pytest temp
    ACL problem is repaired.
-3. Prompt-backed structured fact extraction; the current catalogue intentionally
-   exports exact retrieved excerpts only and therefore cannot invent facts.
-4. Hybrid/expanded retrieval and coverage accounting before claiming that an
+3. Hybrid/expanded retrieval and coverage accounting before claiming that an
    evidence catalogue includes every relevant project.
-5. Google Drive, merge, and deployment.
+4. Google Drive, merge, and deployment.
+
+## Structured evidence brief checkpoint — 1 October 2026
+
+The prompt-backed evidence-extraction layer has now been implemented locally on
+this branch, but is not committed, merged, or deployed yet:
+
+- `prompts/evidence_brief_system.txt` is the version-controlled authority for
+  the extraction task. It treats excerpts as untrusted data, prohibits outside
+  facts and cross-project aggregation, requires exact source/chunk identities
+  and verbatim supporting quotes, separates geographic from transferable
+  evidence, and requires explicit gaps.
+- `evidence_brief.py` sends at most 50 already verified packets to the configured
+  Claude model. It retries malformed JSON once and never returns raw provider
+  exceptions to the UI.
+- Model output is treated as untrusted. A deterministic validator resolves every
+  citation against the exact `(source_id, chunk_id)` pair and accepts its quote
+  only when it occurs in the retrieved packet after whitespace normalisation.
+  Invalid citations are removed and projects with no valid citation are dropped.
+- The model is not allowed to supply an uncited executive narrative. Coverage
+  counts are generated deterministically from retained projects and citations.
+- The Streamlit panel preserves the exact-excerpt catalogue and adds a separate
+  optional structured brief plus deterministic DOCX export. It explicitly says
+  the output is AI-assisted, requires human review, and is not exhaustive.
+- Focused evidence-search/brief/panel tests currently pass. Broader affected
+  tests also pass except for five tests blocked before execution by the known
+  Windows pytest temporary-directory ACL problem; rerunning with an isolated
+  writable temporary directory is the next verification step.
+
+The structured brief improves usability but does not yet solve exhaustive
+recall. The next technical priority is expanded/hybrid retrieval and measurable
+source coverage; Google Drive remains a separate source-adapter step.
