@@ -226,8 +226,8 @@ Still pending before this slice is reviewable as a complete MVP:
 
 ## Structured evidence brief checkpoint — 1 October 2026
 
-The prompt-backed evidence-extraction layer has now been implemented locally on
-this branch, but is not committed, merged, or deployed yet:
+The prompt-backed evidence-extraction layer has now been implemented and
+committed on this feature branch, but is not merged or deployed:
 
 - `prompts/evidence_brief_system.txt` is the version-controlled authority for
   the extraction task. It treats excerpts as untrusted data, prohibits outside
