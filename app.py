@@ -269,6 +269,7 @@ from discovery_panel import render_discovery_panel
 from tor_review_panel import render_tor_review
 from draft_review_panel import render_draft_review
 from opportunity_panel import render_opportunity_panel
+from evidence_search_panel import render_evidence_search_panel
 
 # ---------------------------------------------------------------------------
 # Session state initialisation (8.2)
@@ -529,6 +530,9 @@ st.markdown("Generate professional capability statements from your ToR and capab
 
 with st.expander("Find an opportunity", expanded=True):
     selected_opportunity = render_opportunity_panel()
+
+with st.expander("Search existing evidence", expanded=False):
+    render_evidence_search_panel(st)
 
 # ---------------------------------------------------------------------------
 # STEP 1 — Upload ToR (8.5)

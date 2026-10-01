@@ -156,3 +156,30 @@ git status --short
 
 Continue from the first implementation slice. Do not restart the architecture
 discussion from chat history and do not modify the original `v1.3-dev` checkout.
+
+## Progress checkpoint — 1 October 2026
+
+The first additive local-library Evidence Search slice has been implemented but
+not merged or deployed:
+
+- `capability_retriever.py` now has one shared query-text retrieval core, with
+  the existing ToR wrapper preserved and a new free-form wrapper added.
+- `evidence_search.py` builds source-grounded evidence packets, labels PDF pages
+  separately from approximate DOCX extraction segments, verifies every excerpt
+  against its cited chunk after whitespace normalisation, groups results by
+  source, and renders a deterministic DOCX catalogue.
+- `evidence_search_panel.py` adds an independent Streamlit evidence-search and
+  download panel without changing ToR generation state.
+- Focused evidence/app tests pass. Existing Chroma tests that require pytest's
+  Windows temporary-directory fixture are blocked in this environment by the
+  pre-existing temp-folder ACL problem; the retriever tests that do not require
+  that fixture pass.
+
+Still pending before this slice is reviewable as a complete MVP:
+
+1. Workspace/source abstraction and isolated collection/manifest support.
+2. A real local-library acceptance run in the isolated feature worktree.
+3. Full clean-environment regression verification.
+4. Prompt-backed structured fact extraction; the current catalogue intentionally
+   exports exact retrieved excerpts only and therefore cannot invent facts.
+5. Session uploads, Google Drive, merge, and deployment.

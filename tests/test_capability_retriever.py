@@ -13,9 +13,56 @@ from hypothesis import strategies as st
 
 import chromadb
 
-from capability_retriever import retrieve_chunks
+import capability_retriever
+from capability_retriever import retrieve_chunks, retrieve_query_chunks
 from chroma_client import ChromaUnavailableError
 from config import MAX_RETRIEVAL_RESULTS, GEOGRAPHY_OPTIONS
+
+
+def test_free_form_retrieval_uses_exact_user_query(monkeypatch):
+    captured = {}
+
+    def fake_core(query_string, filters, top_k=None):
+        captured.update(query=query_string, filters=filters, top_k=top_k)
+        return {"retrieved_chunks": []}
+
+    monkeypatch.setattr(capability_retriever, "_retrieve_by_query", fake_core)
+    result = retrieve_query_chunks(
+        "India fraud and narcotics",
+        {"geography": [], "thematic_areas": [], "funder": []},
+        top_k=23,
+    )
+
+    assert result == {"retrieved_chunks": []}
+    assert captured == {
+        "query": "India fraud and narcotics",
+        "filters": {"geography": [], "thematic_areas": [], "funder": []},
+        "top_k": 23,
+    }
+
+
+def test_tor_retrieval_still_builds_the_same_query(monkeypatch):
+    captured = {}
+
+    def fake_core(query_string, filters, top_k=None):
+        captured.update(query=query_string, filters=filters, top_k=top_k)
+        return {"retrieved_chunks": []}
+
+    monkeypatch.setattr(capability_retriever, "_retrieve_by_query", fake_core)
+    retrieve_chunks(
+        {
+            "thematic_areas": ["AML/CFT"],
+            "key_requirements": ["asset recovery"],
+            "geography": ["India"],
+        },
+        {},
+        top_k=11,
+    )
+    assert captured == {
+        "query": "AML/CFT asset recovery India",
+        "filters": {},
+        "top_k": 11,
+    }
 
 
 # ---------------------------------------------------------------------------

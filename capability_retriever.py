@@ -18,7 +18,7 @@ from config import CHROMA_DB_PATH, MAX_RETRIEVAL_RESULTS
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-__all__ = ["retrieve_chunks"]
+__all__ = ["retrieve_chunks", "retrieve_query_chunks"]
 
 
 # ---------------------------------------------------------------------------
@@ -117,24 +117,18 @@ def _chunk_satisfies_filters(metadata: dict, filters: dict) -> bool:
 # Main retriever (Task 3.1)
 # ---------------------------------------------------------------------------
 
-def retrieve_chunks(
-    tor_data: dict,
-    filters: dict,
-    top_k: int = None,
-) -> dict:
-    """
-    Retrieve relevant capability chunks from ChromaDB.
+def _retrieve_by_query(query_string: str, filters: dict, top_k: int = None) -> dict:
+    """Retrieve capability chunks for an already-built query string.
 
-    Args:
-        tor_data:  TorData dict from tor_extractor (or any dict with the same keys).
-        filters:   {"geography": [...], "thematic_areas": [...], "funder": [...]}
-        top_k:     Maximum chunks to return; defaults to MAX_RETRIEVAL_RESULTS.
-
-    Returns:
-        RetrievalResult dict.
+    This is the shared retrieval core for both the existing ToR workflow and
+    the additive free-form Evidence Search workflow. Keeping the Chroma query,
+    filtering, scoring, de-duplication, and failure semantics in one function
+    prevents the two user journeys from drifting apart.
     """
     if top_k is None:
         top_k = MAX_RETRIEVAL_RESULTS
+
+    query_string = str(query_string or "").strip() or "capability statement"
 
     # Normalise filters
     filters = filters or {}
@@ -183,9 +177,6 @@ def retrieve_chunks(
 
     if count == 0:
         return empty_result
-
-    # Build query string (Task 3.2)
-    query_string = _build_query_string(tor_data)
 
     # Request more candidates than needed to allow for deduplication + filtering
     # (Task 3.3 practical approach: query without where clause, filter in Python)
@@ -265,3 +256,35 @@ def retrieve_chunks(
         "documents_used": documents_used,
         "filters_applied": normalised_filters,
     }
+
+
+def retrieve_query_chunks(
+    query_text: str,
+    filters: dict = None,
+    top_k: int = None,
+) -> dict:
+    """Retrieve evidence for a free-form, user-authored search request.
+
+    The request is used only as the semantic query. It is not treated as a
+    generation prompt and cannot add facts to the returned evidence packets.
+    """
+    return _retrieve_by_query(query_text, filters or {}, top_k=top_k)
+
+
+def retrieve_chunks(
+    tor_data: dict,
+    filters: dict,
+    top_k: int = None,
+) -> dict:
+    """
+    Retrieve relevant capability chunks from ChromaDB.
+
+    Args:
+        tor_data:  TorData dict from tor_extractor (or any dict with the same keys).
+        filters:   {"geography": [...], "thematic_areas": [...], "funder": [...]}
+        top_k:     Maximum chunks to return; defaults to MAX_RETRIEVAL_RESULTS.
+
+    Returns:
+        RetrievalResult dict.
+    """
+    return _retrieve_by_query(_build_query_string(tor_data), filters, top_k=top_k)
