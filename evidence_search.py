@@ -23,6 +23,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 from capability_retriever import retrieve_query_chunks
+from evidence_workspace import EvidenceWorkspace
 
 
 DEFAULT_TOP_K = 50
@@ -153,6 +154,7 @@ def build_evidence_packets(
     query: str,
     excerpts_per_document: int = DEFAULT_EXCERPTS_PER_DOCUMENT,
     excerpt_char_limit: int = DEFAULT_EXCERPT_CHAR_LIMIT,
+    library_id: str = "govrisk-default",
 ) -> list[dict]:
     """Build verified, source-groupable evidence packets from retrieved chunks."""
     if excerpts_per_document < 1:
@@ -184,6 +186,8 @@ def build_evidence_packets(
             score = 0.0
 
         packet = {
+            "library_id": library_id,
+            "source_id": source_file.replace("\\", "/").lstrip("/"),
             "chunk_id": chunk_id,
             "source_file": source_file,
             "source_name": _safe_source_name(source_file),
@@ -227,6 +231,7 @@ def search_evidence(
     filters: dict = None,
     top_k: int = DEFAULT_TOP_K,
     excerpts_per_document: int = DEFAULT_EXCERPTS_PER_DOCUMENT,
+    workspace: EvidenceWorkspace = None,
 ) -> dict:
     """Search the indexed library and return source-grounded evidence groups."""
     clean_query = _normalise_whitespace(query)
@@ -242,7 +247,18 @@ def search_evidence(
             "validation_error": "Enter an evidence request before searching.",
         }
 
-    retrieval = retrieve_query_chunks(clean_query, filters or {}, top_k=top_k)
+    retrieval_kwargs = {}
+    if workspace is not None:
+        retrieval_kwargs = {
+            "chroma_db_path": workspace.persist_path,
+            "collection_name": workspace.collection_name,
+        }
+    retrieval = retrieve_query_chunks(
+        clean_query,
+        filters or {},
+        top_k=top_k,
+        **retrieval_kwargs,
+    )
     if retrieval.get("library_unavailable"):
         return {
             "query": clean_query,
@@ -260,6 +276,7 @@ def search_evidence(
         chunks,
         clean_query,
         excerpts_per_document=excerpts_per_document,
+        library_id=workspace.library_id if workspace else "govrisk-default",
     )
     groups = group_evidence_by_source(packets)
     verified = sum(p.get("verification_status") == "verified" for p in packets)
@@ -360,7 +377,13 @@ def build_evidence_catalogue_docx(result: dict) -> bytes:
                 for body_run in cell.paragraphs[0].runs:
                     body_run.font.size = Pt(8.2)
             chunk_note = row.cells[2].add_paragraph()
-            chunk_run = chunk_note.add_run("Chunk ID: " + str(packet.get("chunk_id") or ""))
+            chunk_run = chunk_note.add_run(
+                "Library: {library} | Source ID: {source} | Chunk ID: {chunk}".format(
+                    library=packet.get("library_id") or "govrisk-default",
+                    source=packet.get("source_id") or packet.get("source_name") or "unknown",
+                    chunk=packet.get("chunk_id") or "",
+                )
+            )
             chunk_run.font.size = Pt(7.2)
             chunk_run.font.color.rgb = RGBColor(100, 100, 100)
 

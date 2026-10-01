@@ -252,10 +252,15 @@ def get_client(configured_path):
             ) from recovery_error
 
 
-def get_collection(configured_path):
-    """Return the shared capability collection, healing init failures."""
+def get_collection(configured_path, collection_name=COLLECTION_NAME):
+    """Return a named collection, healing client initialisation failures.
+
+    ``collection_name`` defaults to the historical GovRisk collection so every
+    existing caller remains compatible. Evidence workspaces pass an isolated,
+    deterministic collection name explicitly.
+    """
     client = get_client(configured_path)
-    return client.get_or_create_collection(COLLECTION_NAME)
+    return client.get_or_create_collection(collection_name)
 
 
 # ---------------------------------------------------------------------------

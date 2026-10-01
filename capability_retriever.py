@@ -117,7 +117,14 @@ def _chunk_satisfies_filters(metadata: dict, filters: dict) -> bool:
 # Main retriever (Task 3.1)
 # ---------------------------------------------------------------------------
 
-def _retrieve_by_query(query_string: str, filters: dict, top_k: int = None) -> dict:
+def _retrieve_by_query(
+    query_string: str,
+    filters: dict,
+    top_k: int = None,
+    *,
+    chroma_db_path: str = CHROMA_DB_PATH,
+    collection_name: str = "govrisk_capabilities",
+) -> dict:
     """Retrieve capability chunks for an already-built query string.
 
     This is the shared retrieval core for both the existing ToR workflow and
@@ -159,13 +166,13 @@ def _retrieve_by_query(query_string: str, filters: dict, top_k: int = None) -> d
 
     # Connect to ChromaDB via the defensive shared factory (Task 3.3).
     try:
-        client = get_client(CHROMA_DB_PATH)
+        client = get_client(chroma_db_path)
     except Exception as e:
         return unavailable_result("connection", e)
 
     # Get or create collection — never crash if it doesn't exist yet
     try:
-        collection = client.get_or_create_collection("govrisk_capabilities")
+        collection = client.get_or_create_collection(collection_name)
     except Exception as e:
         return unavailable_result("collection access", e)
 
@@ -262,13 +269,22 @@ def retrieve_query_chunks(
     query_text: str,
     filters: dict = None,
     top_k: int = None,
+    *,
+    chroma_db_path: str = CHROMA_DB_PATH,
+    collection_name: str = "govrisk_capabilities",
 ) -> dict:
     """Retrieve evidence for a free-form, user-authored search request.
 
     The request is used only as the semantic query. It is not treated as a
     generation prompt and cannot add facts to the returned evidence packets.
     """
-    return _retrieve_by_query(query_text, filters or {}, top_k=top_k)
+    return _retrieve_by_query(
+        query_text,
+        filters or {},
+        top_k=top_k,
+        chroma_db_path=chroma_db_path,
+        collection_name=collection_name,
+    )
 
 
 def retrieve_chunks(

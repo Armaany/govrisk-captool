@@ -170,16 +170,45 @@ not merged or deployed:
   source, and renders a deterministic DOCX catalogue.
 - `evidence_search_panel.py` adds an independent Streamlit evidence-search and
   download panel without changing ToR generation state.
+- `evidence_workspace.py` assigns each local-folder library a validated stable
+  identifier, an isolated generated-index directory, and a deterministic
+  non-identifying Chroma collection name. The existing GovRisk paths and
+  collection remain the defaults for every historical caller.
+- `capability_indexer.py`, `chroma_client.py`, and
+  `capability_retriever.py` now accept explicit source/index/collection
+  configuration. Synchronisation, manifests, and retrieval therefore stay
+  inside the selected workspace instead of treating another library's files as
+  removed.
 - Focused evidence/app tests pass. Existing Chroma tests that require pytest's
   Windows temporary-directory fixture are blocked in this environment by the
   pre-existing temp-folder ACL problem; the retriever tests that do not require
   that fixture pass.
 
+The real local-library acceptance run used a new isolated `govrisk-primary`
+workspace; it did not read from or alter the deployed/default collection. The
+sync reported `ready`, 15 source documents, zero failures/removals, and 1,063
+stored chunks. Direct inspection of Chroma—not merely the returned summary—
+confirmed that all 1,063 stored IDs use the workspace namespace, all metadata
+records carry the same namespace/configuration fingerprint, and the historical
+default ID format remains unchanged in its compatibility test. The India/Asia/
+SOC acceptance request retrieved 50 chunks across 11 source documents and
+produced 29 exact quote-verified evidence items with zero `needs_review` items.
+Every returned packet carried the expected `library_id`, a non-empty
+`source_id`, and a namespaced `chunk_id`. This proves the workspace isolation
+and deterministic quote gate, not exhaustive recall: the current retriever is
+still vector-only and limited to the configured top-k.
+
 Still pending before this slice is reviewable as a complete MVP:
 
-1. Workspace/source abstraction and isolated collection/manifest support.
-2. A real local-library acceptance run in the isolated feature worktree.
-3. Full clean-environment regression verification.
+1. A full `DocumentSource` interface. The local-folder workspace is implemented,
+   but session uploads and Drive still need concrete source adapters.
+2. Wiring workspace selection/synchronisation into the UI. The current panel
+   intentionally searches the historical default library; the isolated
+   workspace was exercised through the backend API only.
+3. Full clean-environment regression verification once the Windows pytest temp
+   ACL problem is repaired.
 4. Prompt-backed structured fact extraction; the current catalogue intentionally
    exports exact retrieved excerpts only and therefore cannot invent facts.
-5. Session uploads, Google Drive, merge, and deployment.
+5. Hybrid/expanded retrieval and coverage accounting before claiming that an
+   evidence catalogue includes every relevant project.
+6. Session uploads, Google Drive, merge, and deployment.

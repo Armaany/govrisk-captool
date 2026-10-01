@@ -159,7 +159,7 @@ def compute_file_hash(filepath: str) -> str:
     return h.hexdigest()
 
 
-def index_config_fingerprint() -> str:
+def index_config_fingerprint(identity_namespace: str = "") -> str:
     """Return a short fingerprint of the effective index configuration.
 
     The fingerprint incorporates the engine version and the chunking settings
@@ -170,11 +170,14 @@ def index_config_fingerprint() -> str:
     raw = "{}|max={}|overlap={}".format(
         INDEX_ENGINE_VERSION, MAX_TOKENS_PER_CHUNK, CHUNK_OVERLAP_TOKENS
     )
+    if identity_namespace:
+        raw += "|namespace={}".format(identity_namespace)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def deterministic_chunk_id(relative_name: str, content_hash: str,
-                           config_fingerprint: str, index: int) -> str:
+                           config_fingerprint: str, index: int,
+                           identity_namespace: str = "") -> str:
     """Return a generation-specific, deterministic chunk id.
 
     The id incorporates the normalized relative filename, the document's content
@@ -187,9 +190,11 @@ def deterministic_chunk_id(relative_name: str, content_hash: str,
     can be deleted by their exact ids on failure without touching the old
     generation, and a config-only change cannot silently collide with stale ids.
     """
-    return "{}::{}::{}::chunk::{:06d}".format(
-        relative_name, content_hash, config_fingerprint, index
-    )
+    parts = []
+    if identity_namespace:
+        parts.append(identity_namespace)
+    parts.extend((relative_name, content_hash, config_fingerprint, "chunk", f"{index:06d}"))
+    return "::".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +288,13 @@ def _extract_pages(filepath: str, filename: str, ext: str):
     return [], "unknown", False, "unsupported_type"
 
 
-def _build_chunks_for_pages(page_texts, doc_type: str, relative_name: str, content_hash: str):
+def _build_chunks_for_pages(
+    page_texts,
+    doc_type: str,
+    relative_name: str,
+    content_hash: str,
+    identity_namespace: str = "",
+):
     """Chunk extracted pages into generation-specific chunk records.
 
     Returns ``(ids, documents, metadatas)`` aligned by position. Chunk ids are
@@ -297,7 +308,7 @@ def _build_chunks_for_pages(page_texts, doc_type: str, relative_name: str, conte
     for page_number, text in page_texts:
         all_chunks.extend(chunk_text(text, page_number))
 
-    fingerprint = index_config_fingerprint()
+    fingerprint = index_config_fingerprint(identity_namespace)
     ids: List[str] = []
     documents_list: List[str] = []
     metadatas: List[dict] = []
@@ -316,8 +327,17 @@ def _build_chunks_for_pages(page_texts, doc_type: str, relative_name: str, conte
             "doc_type": doc_type,
             "content_hash": content_hash,
             "config_fingerprint": fingerprint,
+            "identity_namespace": identity_namespace,
         })
-        ids.append(deterministic_chunk_id(relative_name, content_hash, fingerprint, i))
+        ids.append(
+            deterministic_chunk_id(
+                relative_name,
+                content_hash,
+                fingerprint,
+                i,
+                identity_namespace=identity_namespace,
+            )
+        )
         documents_list.append(chunk_text_val)
     return ids, documents_list, metadatas
 
@@ -527,7 +547,13 @@ def _base_summary(storage_mode: str) -> dict:
     }
 
 
-def index_library(force_reindex: bool = False) -> IndexingSummary:
+def index_library(
+    force_reindex: bool = False,
+    *,
+    library_path: str = None,
+    chroma_db_path: str = None,
+    collection_name: str = COLLECTION_NAME,
+) -> IndexingSummary:
     """Content-hash incremental synchronization of the capability library.
 
     Behaviour (Phase 2A):
@@ -549,6 +575,9 @@ def index_library(force_reindex: bool = False) -> IndexingSummary:
     atomically beside the active index.
 
     ``force_reindex`` re-indexes every present document regardless of hash.
+
+    The optional path/collection arguments provide isolated evidence-workspace
+    indexing. Their defaults preserve the historical GovRisk behaviour.
     """
     # Non-blocking, process-level lock. A second concurrent call must not begin
     # extraction or touch Chroma.
@@ -560,14 +589,25 @@ def index_library(force_reindex: bool = False) -> IndexingSummary:
         return IndexingSummary(**summary)
 
     try:
-        return _index_library_locked(force_reindex=force_reindex)
+        return _index_library_locked(
+            force_reindex=force_reindex,
+            library_path=library_path,
+            chroma_db_path=chroma_db_path,
+            collection_name=collection_name,
+        )
     finally:
         # Guaranteed release on both success and exception.
         _INDEX_LOCK.release()
 
 
-def _index_library_locked(force_reindex: bool) -> IndexingSummary:
-    library_path = os.path.abspath(CAPABILITY_LIBRARY_PATH)
+def _index_library_locked(
+    force_reindex: bool,
+    library_path: str = None,
+    chroma_db_path: str = None,
+    collection_name: str = COLLECTION_NAME,
+) -> IndexingSummary:
+    library_path = os.path.abspath(library_path or CAPABILITY_LIBRARY_PATH)
+    chroma_db_path = chroma_db_path or CHROMA_DB_PATH
 
     summary = _base_summary("unknown")
 
@@ -577,7 +617,7 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
     # triggers (and caches) any recovery fallback, so the resolved directory is
     # only authoritative afterwards.
     try:
-        collection = get_collection(CHROMA_DB_PATH)
+        collection = get_collection(chroma_db_path, collection_name=collection_name)
     except Exception as e:  # noqa: BLE001
         logger.warning("ChromaDB unavailable during indexing: %s", e)
         summary["status"] = STATUS_INDEX_UNAVAILABLE
@@ -587,7 +627,7 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
     # Now the resolved-directory cache reflects any recovery fallback, so the
     # storage mode reported here (and written to the manifest) is honest.
     try:
-        storage_mode = get_persist_status(CHROMA_DB_PATH).mode
+        storage_mode = get_persist_status(chroma_db_path).mode
     except Exception:  # noqa: BLE001
         storage_mode = "unknown"
     summary["storage_mode"] = storage_mode
@@ -650,17 +690,23 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
                      "file_size": None, "chunk_count": len(st.get("ids", [])),
                      "status": DOC_STATUS_UNCHANGED}
                     for rel, st in sorted(existing_state.items())
-                ], failed_documents=[],
+                ], failed_documents=[], configured_path=chroma_db_path,
+                collection_name=collection_name,
             )
             return IndexingSummary(**summary)
         # Both source folder and index are empty.
         summary["chunks_total"] = 0
         summary["indexed_documents_total"] = 0
         summary["status"] = STATUS_EMPTY_INDEX
-        _publish_manifest_or_flag(summary, storage_mode, [], [])
+        _publish_manifest_or_flag(
+            summary, storage_mode, [], [],
+            configured_path=chroma_db_path,
+            collection_name=collection_name,
+        )
         return IndexingSummary(**summary)
 
-    current_fingerprint = index_config_fingerprint()
+    identity_namespace = "" if collection_name == COLLECTION_NAME else collection_name
+    current_fingerprint = index_config_fingerprint(identity_namespace)
 
     documents_inventory: List[dict] = []
     failed_documents: List[dict] = []
@@ -721,7 +767,11 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
             continue
 
         new_ids, docs_list, metadatas = _build_chunks_for_pages(
-            pages, doc_type, rel, content_hash
+            pages,
+            doc_type,
+            rel,
+            content_hash,
+            identity_namespace=identity_namespace,
         )
         if not new_ids:
             logger.info("No chunks produced from %s", rel)
@@ -896,24 +946,39 @@ def _index_library_locked(force_reindex: bool) -> IndexingSummary:
     else:
         summary["status"] = STATUS_READY
 
-    _publish_manifest_or_flag(summary, storage_mode, documents_inventory, failed_documents)
+    _publish_manifest_or_flag(
+        summary,
+        storage_mode,
+        documents_inventory,
+        failed_documents,
+        configured_path=chroma_db_path,
+        collection_name=collection_name,
+    )
     return IndexingSummary(**summary)
 
 
-def _build_manifest(summary: dict, storage_mode: str, documents_inventory, failed_documents) -> dict:
+def _build_manifest(
+    summary: dict,
+    storage_mode: str,
+    documents_inventory,
+    failed_documents,
+    collection_name: str = COLLECTION_NAME,
+) -> dict:
     """Build the manifest dict from the current summary and inventories."""
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "status": summary["status"],
         "last_successful_index_at": summary.get("last_successful_index_at"),
-        "collection_name": COLLECTION_NAME,
+        "collection_name": collection_name,
         "storage_mode": storage_mode,
         "source_documents_total": summary["source_documents_total"],
         "indexed_documents_total": summary["indexed_documents_total"],
         "chunks_total": summary["chunks_total"],
         "failed_documents_total": len(failed_documents),
         "failed_documents": failed_documents,
-        "config_fingerprint": index_config_fingerprint(),
+        "config_fingerprint": index_config_fingerprint(
+            "" if collection_name == COLLECTION_NAME else collection_name
+        ),
         "settings": {
             "max_tokens_per_chunk": MAX_TOKENS_PER_CHUNK,
             "chunk_overlap_tokens": CHUNK_OVERLAP_TOKENS,
@@ -923,7 +988,15 @@ def _build_manifest(summary: dict, storage_mode: str, documents_inventory, faile
     }
 
 
-def _publish_manifest_or_flag(summary: dict, storage_mode: str, documents_inventory, failed_documents):
+def _publish_manifest_or_flag(
+    summary: dict,
+    storage_mode: str,
+    documents_inventory,
+    failed_documents,
+    *,
+    configured_path: str = CHROMA_DB_PATH,
+    collection_name: str = COLLECTION_NAME,
+):
     """Atomically publish the manifest, or flag a publication failure.
 
     On success, stamp ``last_successful_index_at`` and write the manifest.
@@ -934,9 +1007,15 @@ def _publish_manifest_or_flag(summary: dict, storage_mode: str, documents_invent
     # Tentative timestamp for the manifest content; only "kept" on success.
     timestamp = _utc_now_z()
     summary["last_successful_index_at"] = timestamp
-    manifest = _build_manifest(summary, storage_mode, documents_inventory, failed_documents)
+    manifest = _build_manifest(
+        summary,
+        storage_mode,
+        documents_inventory,
+        failed_documents,
+        collection_name=collection_name,
+    )
     try:
-        _write_manifest_atomic(CHROMA_DB_PATH, manifest)
+        _write_manifest_atomic(configured_path, manifest)
     except Exception as e:  # noqa: BLE001
         logger.error("Failed to publish index manifest atomically: %s", e)
         summary["status"] = STATUS_MANIFEST_WRITE_FAILED

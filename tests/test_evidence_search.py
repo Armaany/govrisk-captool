@@ -3,6 +3,7 @@ import io
 from docx import Document
 
 import evidence_search
+from evidence_workspace import local_folder_workspace
 from evidence_search import (
     build_evidence_catalogue_docx,
     build_evidence_packets,
@@ -108,6 +109,47 @@ def test_search_uses_free_form_query_only_for_retrieval(monkeypatch):
     assert result["documents_found"] == 1
     assert result["verified_evidence"] == 1
     assert result["needs_review"] == 0
+
+
+def test_search_workspace_forwards_isolated_index_configuration(monkeypatch):
+    captured = {}
+    workspace = local_folder_workspace(
+        "client-one",
+        "Client one",
+        "./source-test-fixture",
+        "./workspace-root-test-fixture",
+    )
+
+    def fake_retrieve(query, filters, top_k, **kwargs):
+        captured.update(query=query, filters=filters, top_k=top_k, **kwargs)
+        return {"retrieved_chunks": [], "library_unavailable": False}
+
+    monkeypatch.setattr(evidence_search, "retrieve_query_chunks", fake_retrieve)
+    result = search_evidence("India", workspace=workspace)
+
+    assert captured["chroma_db_path"] == workspace.persist_path
+    assert captured["collection_name"] == workspace.collection_name
+    assert result["groups"] == []
+
+
+def test_evidence_packets_carry_library_source_and_chunk_identity():
+    packets = build_evidence_packets(
+        [
+            {
+                "chunk_id": "evidence_abc::report.pdf::hash::fp::chunk::000000",
+                "source_file": "regional/report.pdf",
+                "text": "India fraud investigation evidence.",
+                "page_number": 2,
+                "relevance_score": 0.9,
+            }
+        ],
+        "India fraud",
+        library_id="client-one",
+    )
+
+    assert packets[0]["library_id"] == "client-one"
+    assert packets[0]["source_id"] == "regional/report.pdf"
+    assert packets[0]["chunk_id"].startswith("evidence_abc::")
 
 
 def test_blank_request_never_calls_retrieval(monkeypatch):

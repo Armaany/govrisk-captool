@@ -22,8 +22,8 @@ from config import MAX_RETRIEVAL_RESULTS, GEOGRAPHY_OPTIONS
 def test_free_form_retrieval_uses_exact_user_query(monkeypatch):
     captured = {}
 
-    def fake_core(query_string, filters, top_k=None):
-        captured.update(query=query_string, filters=filters, top_k=top_k)
+    def fake_core(query_string, filters, top_k=None, **kwargs):
+        captured.update(query=query_string, filters=filters, top_k=top_k, **kwargs)
         return {"retrieved_chunks": []}
 
     monkeypatch.setattr(capability_retriever, "_retrieve_by_query", fake_core)
@@ -38,13 +38,15 @@ def test_free_form_retrieval_uses_exact_user_query(monkeypatch):
         "query": "India fraud and narcotics",
         "filters": {"geography": [], "thematic_areas": [], "funder": []},
         "top_k": 23,
+        "chroma_db_path": capability_retriever.CHROMA_DB_PATH,
+        "collection_name": "govrisk_capabilities",
     }
 
 
 def test_tor_retrieval_still_builds_the_same_query(monkeypatch):
     captured = {}
 
-    def fake_core(query_string, filters, top_k=None):
+    def fake_core(query_string, filters, top_k=None, **kwargs):
         captured.update(query=query_string, filters=filters, top_k=top_k)
         return {"retrieved_chunks": []}
 
