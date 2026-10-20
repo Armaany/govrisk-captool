@@ -54,13 +54,13 @@ def test_unsupported_file_type_no_extension_returns_error_dict():
 
 
 # ---------------------------------------------------------------------------
-# Unit test: non-JSON Claude response triggers retry then returns error
+# Unit test: non-JSON Claude response never triggers a paid retry
 # ---------------------------------------------------------------------------
 
-def test_non_json_response_triggers_retry_then_returns_error():
+def test_non_json_response_returns_error_without_retry():
     """
-    Requirement 3.7: Non-JSON Claude response triggers exactly one retry;
-    if retry also fails, returns error dict with LOW confidence.
+    Invalid structured output returns a safe LOW-confidence error after exactly
+    one paid request.
     """
     docx_bytes = make_minimal_docx()
 
@@ -76,8 +76,8 @@ def test_non_json_response_triggers_retry_then_returns_error():
 
     assert result["extraction_confidence"] == "LOW"
     assert "error" in result
-    # Should have been called exactly 2 times: initial + 1 retry
-    assert mock_client_instance.messages.create.call_count == 2
+    assert mock_client_instance.messages.create.call_count == 1
+    assert "No automatic retry" in result["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -289,14 +289,14 @@ def _make_mock(response_text):
 
 
 def test_paragraphs_key_present_in_output():
-    """Mock Claude returns tor_data with paragraphs list of 3 strings. Assert result has 3 paragraphs."""
+    """Paragraphs come from local extraction, not model-generated echoed text."""
     docx_bytes = make_minimal_docx()
     mock_client = _make_mock(_make_full_tor_json())
     with patch("tor_extractor.anthropic.Anthropic", return_value=mock_client):
         result = extract_tor(docx_bytes, "test.docx")
     assert "paragraphs" in result
     assert isinstance(result["paragraphs"], list)
-    assert len(result["paragraphs"]) == 3
+    assert result["paragraphs"] == ["Test ToR content about AML/CFT in Mexico."]
 
 
 def test_source_map_key_present_in_output():
@@ -312,7 +312,7 @@ def test_source_map_key_present_in_output():
 
 
 def test_paragraphs_defaults_to_empty_list_on_missing_key():
-    """Mock Claude returns tor_data WITHOUT paragraphs key. Assert result['paragraphs'] == []."""
+    """Model omission cannot remove the locally extracted paragraph list."""
     docx_bytes = make_minimal_docx()
     # JSON without paragraphs key
     partial_json = json.dumps({
@@ -323,7 +323,7 @@ def test_paragraphs_defaults_to_empty_list_on_missing_key():
     mock_client = _make_mock(partial_json)
     with patch("tor_extractor.anthropic.Anthropic", return_value=mock_client):
         result = extract_tor(docx_bytes, "test.docx")
-    assert result["paragraphs"] == []
+    assert result["paragraphs"] == ["Test ToR content about AML/CFT in Mexico."]
 
 
 def test_source_map_defaults_to_empty_structure_on_missing_key():

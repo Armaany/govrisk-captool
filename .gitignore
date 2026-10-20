@@ -5,6 +5,8 @@ output/
 __pycache__/
 *.pyc
 .pytest_cache/
+.pytest-tmp*/
+.test-runtime-temp*/
 
 chroma_db/
 

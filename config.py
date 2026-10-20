@@ -8,8 +8,35 @@ CAPABILITY_LIBRARY_PATH = "./capability_library/"
 CHROMA_DB_PATH = "./chroma_db/"
 OUTPUT_PATH = "./output/"
 
-# Model
-MODEL_NAME = "claude-sonnet-4-5"
+# Models and paid-request limits
+#
+# Keep MODEL_NAME as the backwards-compatible drafting default.  Extraction is
+# deliberately separated so a smaller model can do the structured ToR pass
+# without paying Sonnet rates.  Every value can be changed in Streamlit secrets
+# or the environment without a code deployment.
+MODEL_NAME = os.getenv("MODEL_NAME", "claude-sonnet-4-5")
+EXTRACTION_MODEL_NAME = os.getenv("EXTRACTION_MODEL_NAME", "claude-haiku-4-5")
+GENERATION_MODEL_NAME = os.getenv("GENERATION_MODEL_NAME", MODEL_NAME)
+
+
+def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    """Read a bounded positive integer without making config import fragile."""
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, value))
+
+
+ANTHROPIC_TIMEOUT_SECONDS = _bounded_int_env(
+    "ANTHROPIC_TIMEOUT_SECONDS", 90, 10, 300
+)
+EXTRACTION_MAX_TOKENS = _bounded_int_env(
+    "EXTRACTION_MAX_TOKENS", 3000, 512, 6000
+)
+GENERATION_MAX_TOKENS = _bounded_int_env(
+    "GENERATION_MAX_TOKENS", 8000, 1000, 12000
+)
 
 # Chunking
 MAX_TOKENS_PER_CHUNK = 500

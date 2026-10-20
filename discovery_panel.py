@@ -205,7 +205,8 @@ def render_discovery_panel(
 ) -> "dict | None":
     """
     Main function. Renders the full discovery panel Streamlit UI.
-    Returns the result dict when Generate is clicked, otherwise None.
+    Returns the result dict when the evidence selection is confirmed, otherwise
+    None.  Confirmation never calls the paid drafting API.
     """
     # A. Header
     st.subheader("Step 2.5 — Review & Confirm Evidence")
@@ -224,7 +225,7 @@ def render_discovery_panel(
         # Both buttons disabled — render them greyed out
         col1, col2 = st.columns(2)
         with col1:
-            st.button("🚀 Generate Capability Statement", disabled=True)
+            st.button("✅ Confirm evidence selection", disabled=True)
         with col2:
             st.button("📥 Download Prompt .txt", disabled=True)
         return None
@@ -335,11 +336,11 @@ def render_discovery_panel(
     action_col1, action_col2 = st.columns(2)
 
     with action_col1:
-        generate_clicked = st.button(
-            "🚀 Generate Capability Statement",
+        confirm_clicked = st.button(
+            "✅ Confirm evidence selection",
             disabled=buttons_disabled,
             type="primary",
-            key="dp_generate_btn",
+            key="dp_confirm_btn",
         )
 
     with action_col2:
@@ -349,8 +350,9 @@ def render_discovery_panel(
             key="dp_download_btn",
         )
 
-    # Handle Generate
-    if generate_clicked and not buttons_disabled:
+    # Confirmation is deliberately separate from the single paid generation
+    # action rendered in app.py.
+    if confirm_clicked and not buttons_disabled:
         prompt_txt = _build_prompt_txt(
             selected_projects, tor_data, geo_priority, thematic_emphasis
         )

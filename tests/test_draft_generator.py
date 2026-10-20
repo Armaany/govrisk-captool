@@ -93,12 +93,12 @@ def _make_mock_client(response_text):
 
 
 # ---------------------------------------------------------------------------
-# Unit test: Claude API called with max_tokens=4000
+# Unit test: Claude API uses the configured hard output cap
 # ---------------------------------------------------------------------------
 
-def test_claude_api_called_with_max_tokens_16000():
+def test_claude_api_called_with_configured_token_cap():
     """
-    Requirement 5.2: Claude API must be called with max_tokens=16000.
+    Drafting must use the bounded configured maximum, not an unbounded value.
     """
     tor_data = _make_tor_data()
     chunks = _make_chunks()
@@ -109,9 +109,8 @@ def test_claude_api_called_with_max_tokens_16000():
 
     mock_client.messages.create.assert_called_once()
     call_kwargs = mock_client.messages.create.call_args
-    assert call_kwargs.kwargs.get("max_tokens") == 16000 or (
-        len(call_kwargs.args) > 0 and call_kwargs.args[0] == 16000
-    ), f"max_tokens was not 16000; call args: {call_kwargs}"
+    from config import GENERATION_MAX_TOKENS
+    assert call_kwargs.kwargs.get("max_tokens") == GENERATION_MAX_TOKENS
 
 
 # ---------------------------------------------------------------------------
@@ -152,13 +151,12 @@ def test_system_prompt_passed_to_claude():
 
 
 # ---------------------------------------------------------------------------
-# Unit test: non-JSON response triggers retry then returns error
+# Unit test: non-JSON response never triggers a paid retry
 # ---------------------------------------------------------------------------
 
-def test_non_json_response_triggers_retry_then_returns_error():
+def test_non_json_response_returns_error_without_retry():
     """
-    Requirement 5.8: Non-JSON Claude response triggers exactly one retry;
-    if retry also fails, returns error dict with LOW confidence.
+    Invalid structured output returns an error after one request.
     """
     tor_data = _make_tor_data()
     chunks = _make_chunks()
@@ -171,14 +169,14 @@ def test_non_json_response_triggers_retry_then_returns_error():
     with patch("draft_generator.anthropic.Anthropic", return_value=mock_client):
         result = generate_draft(tor_data, chunks)
 
-    # Should have been called exactly 2 times: initial + 1 retry
-    assert mock_client.messages.create.call_count == 2
+    assert mock_client.messages.create.call_count == 1
     assert "error" in result
+    assert "No automatic retry" in result["error"]
     assert result["summary"]["overall_confidence"] == "LOW"
 
 
-def test_non_json_first_attempt_valid_second_succeeds():
-    """First attempt returns non-JSON, second attempt returns valid JSON — should succeed."""
+def test_non_json_does_not_consume_a_queued_second_response():
+    """A valid queued response is not purchased after malformed output."""
     tor_data = _make_tor_data()
     chunks = _make_chunks()
 
@@ -194,9 +192,8 @@ def test_non_json_first_attempt_valid_second_succeeds():
     with patch("draft_generator.anthropic.Anthropic", return_value=mock_client):
         result = generate_draft(tor_data, chunks)
 
-    assert "error" not in result
-    assert "sections" in result
-    assert mock_client.messages.create.call_count == 2
+    assert "error" in result
+    assert mock_client.messages.create.call_count == 1
 
 
 # ---------------------------------------------------------------------------

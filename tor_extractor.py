@@ -11,7 +11,13 @@ import re
 
 import anthropic
 
-from config import MODEL_NAME, ANTHROPIC_API_KEY
+from ai_request_cache import response_usage, safe_ai_error
+from config import (
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_TIMEOUT_SECONDS,
+    EXTRACTION_MAX_TOKENS,
+    EXTRACTION_MODEL_NAME,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,16 +62,15 @@ USER_PROMPT_TEMPLATE = (
     '"extraction_confidence": "HIGH" if you found all main fields clearly stated. '
     '"MEDIUM" if some fields required inference. '
     '"LOW" if significant information was missing or ambiguous.\n'
-    '"paragraphs": List of all paragraphs from the document in order. Each paragraph is '
-    "a string. Exclude empty paragraphs and paragraphs under 20 characters. "
-    "Maximum 80 paragraphs.\n"
     '"source_map": For each item in geography, thematic_areas, funder, and '
-    "key_requirements, return the paragraph index (0-based position in your paragraphs "
-    "list) and a short snippet (max 25 words) from that paragraph that contains the item. "
+    "key_requirements, return the supplied zero-based paragraph number and a short "
+    "snippet (max 25 words) from that paragraph that contains the item. "
     'Structure: {{"geography": [{{"term": ..., "paragraph_index": ..., "snippet": ...}}], '
     '"thematic_areas": [...], "funder": [...], "key_requirements": [...]}} '
     "If the paragraph cannot be identified, use paragraph_index: -1 and snippet: \"\".\n\n"
-    "DOCUMENT TEXT:\n"
+    "The document paragraphs below are already numbered. Do not return or repeat the full "
+    "paragraph list; use these exact zero-based numbers in source_map.\n\n"
+    "NUMBERED DOCUMENT PARAGRAPHS:\n"
     "{tor_text}"
 )
 
@@ -156,15 +161,35 @@ def _truncate_text(text: str) -> str:
     return text
 
 
-def _call_claude(client: anthropic.Anthropic, user_prompt: str) -> str:
-    """Make a single Claude API call and return the raw text response."""
+def _document_paragraphs(text: str) -> list[str]:
+    """Create the stable paragraph list locally instead of paying to echo it."""
+    paragraphs = []
+    for block in re.split(r"\n\s*\n|\n", text):
+        cleaned = re.sub(r"\s+", " ", block).strip()
+        if len(cleaned) >= 20:
+            paragraphs.append(cleaned)
+        if len(paragraphs) >= 80:
+            break
+    if not paragraphs and text.strip():
+        # Very short or line-heavy notices still need evidence to reach the
+        # model.  The UI already warns about unusually short extraction.
+        paragraphs.append(re.sub(r"\s+", " ", text).strip())
+    return paragraphs
+
+
+def _numbered_paragraph_text(paragraphs: list[str]) -> str:
+    return "\n".join(f"[{index}] {paragraph}" for index, paragraph in enumerate(paragraphs))
+
+
+def _call_claude(client: anthropic.Anthropic, user_prompt: str) -> tuple[str, dict]:
+    """Make one Claude call and return text plus provider token usage."""
     response = client.messages.create(
-        model=MODEL_NAME,
-        max_tokens=8000,
+        model=EXTRACTION_MODEL_NAME,
+        max_tokens=EXTRACTION_MAX_TOKENS,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
-    return response.content[0].text
+    return response.content[0].text, response_usage(response, EXTRACTION_MODEL_NAME)
 
 
 def _strip_markdown_fences(text: str) -> str:
@@ -234,40 +259,45 @@ def extract_tor(file_bytes: bytes, filename: str) -> dict:
 
     # 4.3 — Truncation
     text = _truncate_text(text)
+    paragraphs = _document_paragraphs(text)
 
     # 4.4 / 4.5 — Claude API call
-    user_prompt = USER_PROMPT_TEMPLATE.format(tor_text=text)
+    user_prompt = USER_PROMPT_TEMPLATE.format(
+        tor_text=_numbered_paragraph_text(paragraphs)
+    )
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    except Exception as exc:
-        return _error_state(filename, f"Failed to initialise Anthropic client: {exc}")
+        client = anthropic.Anthropic(
+            api_key=ANTHROPIC_API_KEY,
+            timeout=ANTHROPIC_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+    except Exception:
+        return _error_state(filename, "Could not initialise the AI client.")
 
     # First attempt
     try:
-        raw_text = _call_claude(client, user_prompt)
+        raw_text, usage = _call_claude(client, user_prompt)
     except Exception as exc:
-        return _error_state(filename, f"Claude API call failed: {exc}")
+        return _error_state(
+            filename,
+            safe_ai_error(exc, "ToR analysis", ANTHROPIC_TIMEOUT_SECONDS),
+        )
 
-    # 4.5 — JSON parsing with one retry
+    # Parse once.  Invalid structured output must never cause an invisible
+    # second paid request; the user may explicitly retry after seeing the error.
     try:
         data = json.loads(_strip_markdown_fences(raw_text))
     except json.JSONDecodeError:
-        # Retry once
-        try:
-            raw_text = _call_claude(client, user_prompt)
-        except Exception as exc:
-            return _error_state(filename, f"Claude API call failed on retry: {exc}")
-
-        try:
-            data = json.loads(_strip_markdown_fences(raw_text))
-        except json.JSONDecodeError:
-            return _error_state(
-                filename,
-                "Claude API returned invalid JSON after retry. Please try again.",
-            )
+        return _error_state(
+            filename,
+            "The AI response was incomplete or not structured correctly. "
+            "No automatic retry was made.",
+        )
 
     # 4.5 — Fill missing keys with defaults, override source_file
     data = _fill_defaults(data, filename)
+    data["paragraphs"] = paragraphs
+    data["_ai_usage"] = usage
 
     return data

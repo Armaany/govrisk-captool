@@ -2,12 +2,15 @@
 app.py — Task 8
 Single-page Streamlit application for the GovRisk Capability Statement Generator.
 """
+import hashlib
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st
+
+from ai_request_cache import RequestInProgressError
 
 LIBRARY_UNAVAILABLE_MESSAGE = (
     "Capability-library search is temporarily unavailable. "
@@ -61,6 +64,24 @@ FAILED_CATEGORY_LABELS = {
     "stale_delete_error": "Previous index generation could not be removed",
     "removed_delete_error": "Removed document remains in the search index",
 }
+
+
+def _usage_notice(prefix, result):
+    """Append provider token counts to a completion notice when available."""
+    usage = result.get("_ai_usage", {}) if isinstance(result, dict) else {}
+    if not isinstance(usage, dict):
+        return prefix
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    model = usage.get("model")
+    parts = []
+    if isinstance(model, str) and model:
+        parts.append(model)
+    if isinstance(input_tokens, int):
+        parts.append(f"{input_tokens:,} input tokens")
+    if isinstance(output_tokens, int):
+        parts.append(f"{output_tokens:,} output tokens")
+    return f"{prefix} ({' · '.join(parts)})" if parts else prefix
 
 
 def _safe_failed_document_name(value):
@@ -285,7 +306,9 @@ DEFAULTS = {
     "condensed_file_path": None,
     "discovery_result": None,
     "drp_regen_request": None,
-    "drp_trigger_generate": False,
+    "tor_upload_sha256": None,
+    "last_ai_cache_notice": None,
+    "last_ai_error_notice": None,
     "last_chunks_used": [],
     "selected_opportunity": None,
     "filters": {"geography": [], "thematic_areas": [], "funder": []},
@@ -542,34 +565,76 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    # Only re-extract if a new file is uploaded
-    if (st.session_state.tor_data is None or
-            st.session_state.tor_data.get("source_file") != uploaded_file.name):
+    file_bytes = uploaded_file.getvalue()
+    upload_sha256 = hashlib.sha256(file_bytes).hexdigest()
+
+    # Reset downstream state only when the actual bytes change.  A reconnect or
+    # rerun with the same upload must not start another paid request.
+    if st.session_state.get("tor_upload_sha256") != upload_sha256:
+        st.session_state.tor_upload_sha256 = upload_sha256
+        st.session_state.tor_data = None
+        st.session_state.retrieved_chunks = None
+        st.session_state.retrieval_unavailable = False
+        st.session_state.generated_draft = None
+        st.session_state.output_file_path = None
+        st.session_state.confirmed_tor_data = None
+        st.session_state.discovery_result = None
+        st.session_state["trp_initialised"] = False
+        st.session_state["drp_initialised"] = False
+        st.session_state.approved_draft = None
+        st.session_state.drp_regen_request = None
+
+    st.caption(
+        "ToR analysis sends one paid AI request. There is no automatic retry, "
+        "and a successful result is reused for this exact file."
+    )
+    analyze_label = (
+        "Retry ToR analysis"
+        if st.session_state.tor_data and "error" in st.session_state.tor_data
+        else "Analyze ToR with AI"
+    )
+    analyze_clicked = st.button(
+        analyze_label,
+        disabled=api_key_missing,
+        key="analyze_tor_button",
+        type="primary",
+    )
+
+    if analyze_clicked:
         with st.spinner("Extracting requirements from ToR..."):
             try:
-                from tor_extractor import extract_tor
-                file_bytes = uploaded_file.read()
-                tor_data = extract_tor(file_bytes, uploaded_file.name)
+                from ai_workflows import extract_tor_cached
+                tor_data, cache_hit = extract_tor_cached(
+                    file_bytes,
+                    uploaded_file.name,
+                )
                 st.session_state.tor_data = tor_data
-                # Reset downstream state
-                st.session_state.retrieved_chunks = None
-                st.session_state.retrieval_unavailable = False
-                st.session_state.generated_draft = None
-                st.session_state.output_file_path = None
-                st.session_state.confirmed_tor_data = None
-                st.session_state["trp_initialised"] = False
-                st.session_state["drp_initialised"] = False
-                st.session_state.approved_draft = None
-                st.session_state.drp_regen_request = None
                 if "error" not in tor_data:
+                    st.session_state.last_ai_cache_notice = _usage_notice(
+                        (
+                            "Reused the saved analysis; no new API request was sent."
+                            if cache_hit
+                            else "ToR analysis completed in one API request."
+                        ),
+                        tor_data,
+                    )
                     # Update progress
                     st.session_state.progress_steps[0]["status"] = "done"
                     st.session_state.progress_steps[1]["status"] = "done"
                     st.rerun()
                 else:
                     st.error(f"Could not extract requirements: {tor_data.get('error', 'Unknown error')}")
-            except Exception as e:
-                raise
+            except RequestInProgressError as exc:
+                st.info(str(exc))
+            except Exception:
+                st.error(
+                    "ToR analysis could not complete. No automatic retry was made."
+                )
+
+if st.session_state.get("last_ai_cache_notice"):
+    st.info(st.session_state.pop("last_ai_cache_notice"))
+if st.session_state.get("last_ai_error_notice"):
+    st.error(st.session_state.pop("last_ai_error_notice"))
 
 # ---------------------------------------------------------------------------
 # STEP 1.5 — ToR Review Panel
@@ -657,9 +722,12 @@ if confirmed_tor_data:
             GEOGRAPHY_OPTIONS,
             THEMATIC_OPTIONS,
         )
-        # Auto-trigger generation when discovery confirms
-        if discovery_result is not None and not st.session_state.get("generated_draft"):
-            st.session_state["drp_trigger_generate"] = True
+        if discovery_result is not None:
+            # Confirmation stores the exact evidence selection but never starts
+            # a paid generation request.
+            st.session_state.discovery_result = discovery_result
+
+confirmed_discovery = st.session_state.get("discovery_result")
 
 # ---------------------------------------------------------------------------
 # STEP 3 — Generate (8.7 / 8.8 / 8.9)
@@ -679,11 +747,14 @@ can_generate = _can_generate(
     doc_count=searchable_chunks if index_allows_generation else 0,
     retrieval_unavailable=st.session_state.get("retrieval_unavailable", False),
 )
+can_generate = can_generate and bool(confirmed_discovery)
 
 if api_key_missing:
     st.warning("Cannot generate: API key is missing.")
 if confirmed_tor_data is None:
     st.info("Please upload a ToR document and confirm your selections first.")
+elif not confirmed_discovery:
+    st.info("Review the retrieved evidence and confirm the selection before generating.")
 if library_state == "index_unavailable":
     st.warning(
         "⚠️ The search index is unavailable, so document generation is disabled. "
@@ -700,11 +771,12 @@ generate_button = st.button(
     disabled=not can_generate,
     type="primary",
 )
+st.caption(
+    "Cost control: this button sends at most one paid draft request. "
+    "There is no automatic retry, and an identical successful result is reused."
+)
 
-if (generate_button and can_generate) or (
-    st.session_state.get("drp_trigger_generate") and not st.session_state.get("generated_draft")
-):
-    st.session_state["drp_trigger_generate"] = False
+if generate_button and can_generate:
     # Reset progress
     for step in st.session_state.progress_steps:
         step["status"] = "pending"
@@ -719,10 +791,10 @@ if (generate_button and can_generate) or (
 
         # Step: Use chunks from Discovery Panel
         update_progress(2, "active")
-        if discovery_result is not None:
-            chunks_to_use = discovery_result["selected_chunks"]
-            geo_priority = discovery_result["geo_priority"]
-            thematic_emphasis = discovery_result["thematic_emphasis"]
+        if confirmed_discovery is not None:
+            chunks_to_use = confirmed_discovery["selected_chunks"]
+            geo_priority = confirmed_discovery["geo_priority"]
+            thematic_emphasis = confirmed_discovery["thematic_emphasis"]
         else:
             chunks_to_use = st.session_state.retrieved_chunks or []
             geo_priority = "equal"
@@ -734,8 +806,8 @@ if (generate_button and can_generate) or (
         # Step: Generate draft
         update_progress(3, "active")
         with st.spinner("Generating capability statement draft..."):
-            from draft_generator import generate_draft
-            generated_draft = generate_draft(
+            from ai_workflows import generate_draft_cached
+            generated_draft, cache_hit = generate_draft_cached(
                 confirmed_tor_data,
                 chunks_to_use,
                 sections_to_include=st.session_state.sections,
@@ -745,15 +817,26 @@ if (generate_button and can_generate) or (
                 st.error(f"Generation failed: {generated_draft['error']}")
                 st.stop()
             st.session_state.generated_draft = generated_draft
-            print('COUNTRY_TABLE_SAMPLE:', st.session_state.generated_draft.get('sections', {}).get('country_table', [])[:2])
+            st.session_state.last_ai_cache_notice = _usage_notice(
+                (
+                    "Reused the saved draft; no new API request was sent."
+                    if cache_hit
+                    else "Draft generation completed in one API request."
+                ),
+                generated_draft,
+            )
         update_progress(3, "done")
 
         # Draft generated — hand off to review panel
         st.session_state.approved_draft = None
         st.rerun()
 
-    except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
+    except RequestInProgressError as exc:
+        st.info(str(exc))
+    except Exception:
+        st.error(
+            "Draft generation could not complete. No automatic retry was made."
+        )
 
 # ---------------------------------------------------------------------------
 # Progress indicator display (8.8)
@@ -779,20 +862,39 @@ if st.session_state.generated_draft and "error" not in st.session_state.generate
     if st.session_state.get("drp_regen_request"):
         regen = st.session_state.drp_regen_request
         with st.spinner(f"Regenerating {regen['section_id']}..."):
-            from draft_generator import generate_draft as _regen_draft
-            section_draft = _regen_draft(
-                confirmed_tor_data or st.session_state.get("confirmed_tor_data", {}),
-                st.session_state.get("last_chunks_used", []),
-                output_language=output_language if 'output_language' in dir() else "English",
-                feedback=regen.get("feedback", ""),
-                single_section=regen["section_id"],
-            )
-            if "error" not in section_draft:
-                new_content = section_draft.get("sections", {}).get(
-                    regen["section_id"], regen.get("current_content", "")
+            try:
+                from ai_workflows import generate_draft_cached as _regen_draft
+                section_draft, cache_hit = _regen_draft(
+                    confirmed_tor_data or st.session_state.get("confirmed_tor_data", {}),
+                    st.session_state.get("last_chunks_used", []),
+                    output_language=output_language if 'output_language' in dir() else "English",
+                    feedback=regen.get("feedback", ""),
+                    single_section=regen["section_id"],
                 )
-                st.session_state[f"drp_section_content_{regen['section_id']}"] = new_content
-                st.session_state[f"drp_section_approved_{regen['section_id']}"] = False
+                if "error" not in section_draft:
+                    new_content = section_draft.get("sections", {}).get(
+                        regen["section_id"], regen.get("current_content", "")
+                    )
+                    st.session_state[f"drp_section_content_{regen['section_id']}"] = new_content
+                    st.session_state[f"drp_section_approved_{regen['section_id']}"] = False
+                    st.session_state.last_ai_cache_notice = _usage_notice(
+                        (
+                            "Reused the saved section; no new API request was sent."
+                            if cache_hit
+                            else "Section regeneration completed in one API request."
+                        ),
+                        section_draft,
+                    )
+                else:
+                    st.session_state.last_ai_error_notice = section_draft.get(
+                        "error", "Section regeneration failed."
+                    )
+            except RequestInProgressError as exc:
+                st.session_state.last_ai_error_notice = str(exc)
+            except Exception:
+                st.session_state.last_ai_error_notice = (
+                    "Section regeneration could not complete. No automatic retry was made."
+                )
             st.session_state.drp_regen_request = None
             st.rerun()
 

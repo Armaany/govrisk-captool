@@ -224,16 +224,16 @@
       purpose: no docstring
   def _make_mock_client(response_text)
       purpose: Return a mock Anthropic client that returns the given text.
-  def test_claude_api_called_with_max_tokens_16000()
-      purpose: Requirement 5.2: Claude API must be called with max_tokens=16000.
+  def test_claude_api_called_with_configured_token_cap()
+      purpose: Draft API call uses the bounded configured output-token cap.
   def test_system_prompt_contains_required_instructions()
       purpose: Requirement 5.3: System prompt must contain all required instructions.
   def test_system_prompt_passed_to_claude()
       purpose: System prompt is passed to the Claude API call.
-  def test_non_json_response_triggers_retry_then_returns_error()
-      purpose: Requirement 5.8: Non-JSON Claude response triggers exactly one retry;
-  def test_non_json_first_attempt_valid_second_succeeds()
-      purpose: First attempt returns non-JSON, second attempt returns valid JSON — sh
+  def test_non_json_response_returns_error_without_retry()
+      purpose: Non-JSON output returns a safe error after one paid request.
+  def test_non_json_does_not_consume_a_queued_second_response()
+      purpose: Invalid output never consumes an invisible second paid response.
   def test_generate_draft_never_raises_on_bad_input()
       purpose: generate_draft must always return a dict, never raise.
   def test_generate_draft_returns_error_dict_on_api_failure()
@@ -282,8 +282,8 @@
       purpose: Requirement 3.9: Non-.docx/.pdf file returns error dict with LOW confi
   def test_unsupported_file_type_no_extension_returns_error_dict()
       purpose: Files with no extension also return error dict.
-  def test_non_json_response_triggers_retry_then_returns_error()
-      purpose: Requirement 3.7: Non-JSON Claude response triggers exactly one retry;
+  def test_non_json_response_returns_error_without_retry()
+      purpose: Non-JSON extraction returns a safe error after one paid request.
   def test_system_prompt_contains_required_instruction()
       purpose: Requirement 3.5: System prompt instructs Claude to respond only with v
   def test_p6_text_truncation(length, seed_char)

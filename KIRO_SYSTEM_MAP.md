@@ -250,11 +250,11 @@ Complete inventory of every Python file in the project.
 | `_make_chunks` | `n` | *(no docstring)* Helper: returns a list of n test chunk dicts. |
 | `_make_valid_draft_json` | — | *(no docstring)* Helper: returns a valid GeneratedDraft JSON string. |
 | `_make_mock_client` | `response_text` | Return a mock Anthropic client that returns the given text. |
-| `test_claude_api_called_with_max_tokens_16000` | — | Requirement 5.2: Claude API must be called with max_tokens=16000. |
+| `test_claude_api_called_with_configured_token_cap` | — | Draft API call uses the bounded configured output-token cap. |
 | `test_system_prompt_contains_required_instructions` | — | Requirement 5.3: System prompt must contain all required instructions. |
 | `test_system_prompt_passed_to_claude` | — | System prompt is passed to the Claude API call. |
-| `test_non_json_response_triggers_retry_then_returns_error` | — | Requirement 5.8: Non-JSON Claude response triggers exactly one retry. |
-| `test_non_json_first_attempt_valid_second_succeeds` | — | First attempt returns non-JSON, second attempt returns valid JSON — should succeed. |
+| `test_non_json_response_returns_error_without_retry` | — | Non-JSON output returns a safe error after one paid request. |
+| `test_non_json_does_not_consume_a_queued_second_response` | — | Invalid output never consumes an invisible second paid response. |
 | `test_generate_draft_never_raises_on_bad_input` | — | generate_draft must always return a dict, never raise. |
 | `test_generate_draft_returns_error_dict_on_api_failure` | — | When the API raises an exception, an error dict is returned. |
 | `test_missing_section_keys_filled_with_empty_string` | — | Task 5.5: Missing section keys are added with empty string value. |
@@ -297,7 +297,7 @@ Complete inventory of every Python file in the project.
 | `make_minimal_docx` | `text` | *(no docstring)* Helper: returns bytes of a minimal valid .docx file. |
 | `test_unsupported_file_type_returns_error_dict` | — | Requirement 3.9: Non-.docx/.pdf file returns error dict with LOW confidence. |
 | `test_unsupported_file_type_no_extension_returns_error_dict` | — | Files with no extension also return error dict. |
-| `test_non_json_response_triggers_retry_then_returns_error` | — | Requirement 3.7: Non-JSON Claude response triggers exactly one retry. |
+| `test_non_json_response_returns_error_without_retry` | — | Non-JSON extraction returns a safe error after one paid request. |
 | `test_system_prompt_contains_required_instruction` | — | Requirement 3.5: System prompt instructs Claude to respond only with valid JSON. |
 | `test_p6_text_truncation` | `length, seed_char` | P6: For any text longer than 15,000 chars, the truncation logic produces exactly 15,000 characters. |
 | `test_p19_tor_data_json_roundtrip` | `tor_data` | P19: Serialising a TorData dict to JSON and deserialising it produces equal object. |

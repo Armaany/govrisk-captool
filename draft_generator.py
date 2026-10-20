@@ -10,7 +10,13 @@ import re
 
 import anthropic
 
-from config import MODEL_NAME, ANTHROPIC_API_KEY
+from ai_request_cache import response_usage, safe_ai_error
+from config import (
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_TIMEOUT_SECONDS,
+    GENERATION_MAX_TOKENS,
+    GENERATION_MODEL_NAME,
+)
 
 
 def _strip_markdown_fences(text: str) -> str:
@@ -195,15 +201,19 @@ def _error_state(message: str) -> dict:
     }
 
 
-def _call_claude(client: anthropic.Anthropic, system: str, user_prompt: str) -> str:
-    """Make a single Claude API call and return the raw text response."""
+def _call_claude(
+    client: anthropic.Anthropic,
+    system: str,
+    user_prompt: str,
+) -> tuple[str, dict]:
+    """Make one Claude call and return text plus provider token usage."""
     response = client.messages.create(
-        model=MODEL_NAME,
-        max_tokens=16000,
+        model=GENERATION_MODEL_NAME,
+        max_tokens=GENERATION_MAX_TOKENS,
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
     )
-    return response.content[0].text
+    return response.content[0].text, response_usage(response, GENERATION_MODEL_NAME)
 
 
 def _derive_confidence(interpretation_log: list) -> str:
@@ -361,34 +371,31 @@ def generate_draft(
 
     # Initialise Claude client
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    except Exception as exc:
-        return _error_state(f"Failed to initialise Anthropic client: {exc}")
+        client = anthropic.Anthropic(
+            api_key=ANTHROPIC_API_KEY,
+            timeout=ANTHROPIC_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+    except Exception:
+        return _error_state("Could not initialise the AI client.")
 
     # First API call attempt
     try:
-        raw_text = _call_claude(client, SYSTEM_PROMPT, user_prompt)
-        print('RAW_LEN:', len(raw_text), 'LAST100:', repr(raw_text[-100:]))
+        raw_text, usage = _call_claude(client, SYSTEM_PROMPT, user_prompt)
     except Exception as exc:
-        return _error_state(f"Claude API call failed: {exc}")
+        return _error_state(
+            safe_ai_error(exc, "Draft generation", ANTHROPIC_TIMEOUT_SECONDS)
+        )
 
-    # Task 5.4: JSON parsing with one retry
+    # Parse once.  Invalid structured output must never cause an invisible
+    # second paid request; the user may explicitly retry after seeing the error.
     try:
         data = json.loads(_strip_markdown_fences(raw_text))
     except json.JSONDecodeError:
-        # Retry once
-        try:
-            raw_text = _call_claude(client, SYSTEM_PROMPT, user_prompt)
-            print('RAW_LEN:', len(raw_text), 'LAST100:', repr(raw_text[-100:]))
-        except Exception as exc:
-            return _error_state(f"Claude API call failed on retry: {exc}")
-
-        try:
-            data = json.loads(_strip_markdown_fences(raw_text))
-        except json.JSONDecodeError:
-            return _error_state(
-                "Claude API returned invalid JSON after retry. Please try again."
-            )
+        return _error_state(
+            "The AI response was incomplete or not structured correctly. "
+            "No automatic retry was made."
+        )
 
     # Task 5.5 + 5.6 + 5.7: Validate and normalise
     try:
@@ -396,4 +403,5 @@ def generate_draft(
     except Exception as exc:
         return _error_state(f"Failed to validate generated draft: {exc}")
 
+    data["_ai_usage"] = usage
     return data
