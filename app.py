@@ -819,6 +819,13 @@ if generate_button and can_generate:
             )
             if "error" in generated_draft:
                 st.error(f"Generation failed: {generated_draft['error']}")
+                if generated_draft.get("_ai_usage"):
+                    st.caption(
+                        _usage_notice(
+                            "Provider usage recorded for this failed attempt.",
+                            generated_draft,
+                        )
+                    )
                 st.stop()
             st.session_state.generated_draft = generated_draft
             st.session_state.last_ai_cache_notice = _usage_notice(

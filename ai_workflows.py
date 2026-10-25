@@ -16,7 +16,7 @@ from tor_extractor import extract_tor
 
 
 EXTRACTION_PROMPT_VERSION = "cost-safe-v1"
-GENERATION_PROMPT_VERSION = "cost-safe-v1"
+GENERATION_PROMPT_VERSION = "cost-safe-structured-v2"
 
 
 def extract_tor_cached(

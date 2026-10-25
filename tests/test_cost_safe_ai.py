@@ -186,6 +186,7 @@ def test_generation_client_has_timeout_no_sdk_retries_and_bounded_output():
     kwargs = client.messages.create.call_args.kwargs
     assert kwargs["model"] == GENERATION_MODEL_NAME
     assert kwargs["max_tokens"] == GENERATION_MAX_TOKENS
+    assert kwargs["output_config"]["format"]["type"] == "json_schema"
 
 
 def test_safe_error_does_not_render_provider_exception_text():

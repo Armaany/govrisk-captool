@@ -113,6 +113,22 @@ def test_claude_api_called_with_configured_token_cap():
     assert call_kwargs.kwargs.get("max_tokens") == GENERATION_MAX_TOKENS
 
 
+def test_claude_api_uses_native_structured_output_schema():
+    """Completed provider responses are constrained to parseable draft JSON."""
+    mock_client = _make_mock_client(_make_valid_draft_json())
+
+    with patch("draft_generator.anthropic.Anthropic", return_value=mock_client):
+        result = generate_draft(_make_tor_data(), _make_chunks())
+
+    assert "error" not in result
+    output_format = mock_client.messages.create.call_args.kwargs["output_config"]["format"]
+    assert output_format["type"] == "json_schema"
+    schema = output_format["schema"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["sections"]["additionalProperties"] is False
+    assert schema["required"] == ["sections", "interpretation_log"]
+
+
 # ---------------------------------------------------------------------------
 # Unit test: system prompt contains all required instructions
 # ---------------------------------------------------------------------------
@@ -194,6 +210,26 @@ def test_non_json_does_not_consume_a_queued_second_response():
 
     assert "error" in result
     assert mock_client.messages.create.call_count == 1
+
+
+def test_output_limit_reports_precise_error_and_usage_without_retry():
+    """A truncated paid response is identified without buying a continuation."""
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock(text='{"sections":')]
+    mock_response.stop_reason = "max_tokens"
+    mock_response.usage.input_tokens = 4321
+    mock_response.usage.output_tokens = 8000
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_response
+
+    with patch("draft_generator.anthropic.Anthropic", return_value=mock_client):
+        result = generate_draft(_make_tor_data(), _make_chunks())
+
+    assert mock_client.messages.create.call_count == 1
+    assert "output limit" in result["error"]
+    assert "No automatic retry" in result["error"]
+    assert result["_ai_usage"]["input_tokens"] == 4321
+    assert result["_ai_usage"]["output_tokens"] == 8000
 
 
 # ---------------------------------------------------------------------------

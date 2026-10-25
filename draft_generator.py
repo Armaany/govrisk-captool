@@ -53,42 +53,82 @@ ALL_SECTIONS = [
     "alignment_with_tor",
 ]
 
-# JSON schema string for the user prompt (from SPEC.md §4.4)
-_JSON_SCHEMA = """{
-    "sections": {
-        "opening_statement": "string with [REF:filename:page_N] tags",
-        "institutional_overview": "string with [REF:filename:page_N] tags",
-        "country_table": [
-            {
-                "country": "string",
-                "project_count": "integer",
-                "year_range": "string",
-                "named_identifiers": ["list of strings"],
-                "donors": ["list of strings"]
-            }
-        ],
-        "geographic_experience": "string with [REF:filename:page_N] tags",
-        "thematic_areas": "string with [REF:filename:page_N] tags",
-        "selected_project_experience": "string with [REF:filename:page_N] tags",
-        "alignment_with_tor": "string with [REF:filename:page_N] tags"
+# Native structured-output schema.  Claude constrains decoding to this schema,
+# so a completed response cannot contain malformed JSON.  Summary counts remain
+# application-owned and are derived after validation rather than model-authored.
+_DRAFT_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "sections": {
+            "type": "object",
+            "properties": {
+                "opening_statement": {"type": "string"},
+                "institutional_overview": {"type": "string"},
+                "country_table": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "country": {"type": "string"},
+                            "project_count": {"type": "integer"},
+                            "year_range": {"type": "string"},
+                            "named_identifiers": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "donors": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": [
+                            "country",
+                            "project_count",
+                            "year_range",
+                            "named_identifiers",
+                            "donors",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+                "geographic_experience": {"type": "string"},
+                "thematic_areas": {"type": "string"},
+                "selected_project_experience": {"type": "string"},
+                "alignment_with_tor": {"type": "string"},
+            },
+            "required": ALL_SECTIONS,
+            "additionalProperties": False,
+        },
+        "interpretation_log": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "section": {"type": "string"},
+                    "inference_made": {"type": "string"},
+                    "source_used": {"type": "string"},
+                    "gap_flagged": {"type": ["string", "null"]},
+                    "confidence": {
+                        "type": "string",
+                        "enum": ["HIGH", "MEDIUM", "LOW"],
+                    },
+                },
+                "required": [
+                    "section",
+                    "inference_made",
+                    "source_used",
+                    "gap_flagged",
+                    "confidence",
+                ],
+                "additionalProperties": False,
+            },
+        },
     },
-    "interpretation_log": [
-        {
-            "section": "string",
-            "inference_made": "string",
-            "source_used": "string",
-            "gap_flagged": "string or null",
-            "confidence": "HIGH | MEDIUM | LOW"
-        }
-    ],
-    "summary": {
-        "sections_generated": "integer",
-        "projects_referenced": "integer",
-        "countries_covered": "integer",
-        "documents_used": "integer",
-        "overall_confidence": "HIGH | MEDIUM | LOW"
-    }
-}"""
+    "required": ["sections", "interpretation_log"],
+    "additionalProperties": False,
+}
+
+_JSON_SCHEMA = json.dumps(_DRAFT_OUTPUT_SCHEMA, indent=2)
 
 # ---------------------------------------------------------------------------
 # System prompt (from SPEC.md §6.2)
@@ -133,18 +173,11 @@ _USER_PROMPT_TEMPLATE = (
     "{formatted_chunks}\n"
     "\n"
     "Generate the capability statement following all system rules.\n"
-    "After the full draft, append an INTERPRETATION LOG in this exact format:\n"
-    "\n"
-    "INTERPRETATION LOG\n"
-    "Section: [section name]\n"
-    "Inference: [what inference was made and why]\n"
-    "Source: [source file and page]\n"
-    "Gap: [gap description or \"None\"]\n"
-    "Confidence: HIGH | MEDIUM | LOW\n"
-    "\n"
-    "Repeat one block per section.\n"
-    "\n"
-    "Return the full output as JSON matching this structure:\n"
+    "Keep each narrative section under 350 words and selected_project_experience "
+    "under 700 words. Keep interpretation-log entries concise.\n"
+    "Populate only the requested sections; return an empty string (or [] for "
+    "country_table) for excluded sections.\n"
+    "Return only the structured JSON requested by the response schema:\n"
     "{json_schema}"
 )
 
@@ -205,15 +238,36 @@ def _call_claude(
     client: anthropic.Anthropic,
     system: str,
     user_prompt: str,
-) -> tuple[str, dict]:
-    """Make one Claude call and return text plus provider token usage."""
+) -> tuple[str, dict, str | None]:
+    """Make one Claude call and return text, usage, and the stop reason."""
     response = client.messages.create(
         model=GENERATION_MODEL_NAME,
         max_tokens=GENERATION_MAX_TOKENS,
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": _DRAFT_OUTPUT_SCHEMA,
+            }
+        },
     )
-    return response.content[0].text, response_usage(response, GENERATION_MODEL_NAME)
+    raw_text = next(
+        (
+            block.text
+            for block in response.content
+            if isinstance(getattr(block, "text", None), str)
+        ),
+        "",
+    )
+    stop_reason = getattr(response, "stop_reason", None)
+    if not isinstance(stop_reason, str):
+        stop_reason = None
+    return (
+        raw_text,
+        response_usage(response, GENERATION_MODEL_NAME),
+        stop_reason,
+    )
 
 
 def _derive_confidence(interpretation_log: list) -> str:
@@ -381,21 +435,40 @@ def generate_draft(
 
     # First API call attempt
     try:
-        raw_text, usage = _call_claude(client, SYSTEM_PROMPT, user_prompt)
+        raw_text, usage, stop_reason = _call_claude(
+            client, SYSTEM_PROMPT, user_prompt
+        )
     except Exception as exc:
         return _error_state(
             safe_ai_error(exc, "Draft generation", GENERATION_TIMEOUT_SECONDS)
         )
+
+    if stop_reason in {"max_tokens", "model_context_window_exceeded"}:
+        result = _error_state(
+            "The AI response reached its output limit before the structured draft "
+            "was complete. No automatic retry was made. Select fewer sections or "
+            "evidence items before trying again."
+        )
+        result["_ai_usage"] = usage
+        return result
+    if stop_reason == "refusal":
+        result = _error_state(
+            "The AI provider declined this request. No automatic retry was made."
+        )
+        result["_ai_usage"] = usage
+        return result
 
     # Parse once.  Invalid structured output must never cause an invisible
     # second paid request; the user may explicitly retry after seeing the error.
     try:
         data = json.loads(_strip_markdown_fences(raw_text))
     except json.JSONDecodeError:
-        return _error_state(
-            "The AI response was incomplete or not structured correctly. "
-            "No automatic retry was made."
+        result = _error_state(
+            "The AI completed the request but did not return the required "
+            "structured draft. No automatic retry was made."
         )
+        result["_ai_usage"] = usage
+        return result
 
     # Task 5.5 + 5.6 + 5.7: Validate and normalise
     try:
