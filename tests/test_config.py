@@ -57,3 +57,9 @@ def test_max_generation_chunks_defined():
     from config import MAX_GENERATION_CHUNKS
     assert isinstance(MAX_GENERATION_CHUNKS, int)
     assert MAX_GENERATION_CHUNKS > 0
+    assert MAX_GENERATION_CHUNKS <= 35
+
+
+def test_generation_has_a_longer_timeout_than_extraction():
+    from config import EXTRACTION_TIMEOUT_SECONDS, GENERATION_TIMEOUT_SECONDS
+    assert GENERATION_TIMEOUT_SECONDS > EXTRACTION_TIMEOUT_SECONDS

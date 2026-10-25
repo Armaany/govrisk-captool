@@ -13,7 +13,7 @@ import anthropic
 from ai_request_cache import response_usage, safe_ai_error
 from config import (
     ANTHROPIC_API_KEY,
-    ANTHROPIC_TIMEOUT_SECONDS,
+    GENERATION_TIMEOUT_SECONDS,
     GENERATION_MAX_TOKENS,
     GENERATION_MODEL_NAME,
 )
@@ -373,7 +373,7 @@ def generate_draft(
     try:
         client = anthropic.Anthropic(
             api_key=ANTHROPIC_API_KEY,
-            timeout=ANTHROPIC_TIMEOUT_SECONDS,
+            timeout=GENERATION_TIMEOUT_SECONDS,
             max_retries=0,
         )
     except Exception:
@@ -384,7 +384,7 @@ def generate_draft(
         raw_text, usage = _call_claude(client, SYSTEM_PROMPT, user_prompt)
     except Exception as exc:
         return _error_state(
-            safe_ai_error(exc, "Draft generation", ANTHROPIC_TIMEOUT_SECONDS)
+            safe_ai_error(exc, "Draft generation", GENERATION_TIMEOUT_SECONDS)
         )
 
     # Parse once.  Invalid structured output must never cause an invisible

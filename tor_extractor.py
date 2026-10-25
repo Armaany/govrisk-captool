@@ -14,7 +14,7 @@ import anthropic
 from ai_request_cache import response_usage, safe_ai_error
 from config import (
     ANTHROPIC_API_KEY,
-    ANTHROPIC_TIMEOUT_SECONDS,
+    EXTRACTION_TIMEOUT_SECONDS,
     EXTRACTION_MAX_TOKENS,
     EXTRACTION_MODEL_NAME,
 )
@@ -269,7 +269,7 @@ def extract_tor(file_bytes: bytes, filename: str) -> dict:
     try:
         client = anthropic.Anthropic(
             api_key=ANTHROPIC_API_KEY,
-            timeout=ANTHROPIC_TIMEOUT_SECONDS,
+            timeout=EXTRACTION_TIMEOUT_SECONDS,
             max_retries=0,
         )
     except Exception:
@@ -281,7 +281,7 @@ def extract_tor(file_bytes: bytes, filename: str) -> dict:
     except Exception as exc:
         return _error_state(
             filename,
-            safe_ai_error(exc, "ToR analysis", ANTHROPIC_TIMEOUT_SECONDS),
+            safe_ai_error(exc, "ToR analysis", EXTRACTION_TIMEOUT_SECONDS),
         )
 
     # Parse once.  Invalid structured output must never cause an invisible

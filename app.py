@@ -773,7 +773,8 @@ generate_button = st.button(
 )
 st.caption(
     "Cost control: this button sends at most one paid draft request. "
-    "There is no automatic retry, and an identical successful result is reused."
+    "There is no automatic retry, and an identical successful result is reused. "
+    "A full draft can take up to four minutes; keep this page open."
 )
 
 if generate_button and can_generate:
@@ -805,7 +806,10 @@ if generate_button and can_generate:
 
         # Step: Generate draft
         update_progress(3, "active")
-        with st.spinner("Generating capability statement draft..."):
+        with st.spinner(
+            "Generating capability statement draft (this can take up to four minutes; "
+            "keep this page open)..."
+        ):
             from ai_workflows import generate_draft_cached
             generated_draft, cache_hit = generate_draft_cached(
                 confirmed_tor_data,

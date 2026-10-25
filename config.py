@@ -31,6 +31,12 @@ def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int
 ANTHROPIC_TIMEOUT_SECONDS = _bounded_int_env(
     "ANTHROPIC_TIMEOUT_SECONDS", 90, 10, 300
 )
+EXTRACTION_TIMEOUT_SECONDS = _bounded_int_env(
+    "EXTRACTION_TIMEOUT_SECONDS", ANTHROPIC_TIMEOUT_SECONDS, 10, 300
+)
+GENERATION_TIMEOUT_SECONDS = _bounded_int_env(
+    "GENERATION_TIMEOUT_SECONDS", 240, 30, 600
+)
 EXTRACTION_MAX_TOKENS = _bounded_int_env(
     "EXTRACTION_MAX_TOKENS", 3000, 512, 6000
 )
@@ -44,7 +50,9 @@ CHUNK_OVERLAP_TOKENS = 50
 
 # Retrieval
 MAX_RETRIEVAL_RESULTS = 50
-MAX_GENERATION_CHUNKS = 35
+MAX_GENERATION_CHUNKS = _bounded_int_env(
+    "MAX_GENERATION_CHUNKS", 20, 5, 35
+)
 
 # Filter options
 GEOGRAPHY_OPTIONS = [

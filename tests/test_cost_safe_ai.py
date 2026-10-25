@@ -15,9 +15,10 @@ import ai_workflows
 import pytest
 from ai_request_cache import RequestInProgressError, run_cached_json, safe_ai_error
 from config import (
-    ANTHROPIC_TIMEOUT_SECONDS,
+    EXTRACTION_TIMEOUT_SECONDS,
     EXTRACTION_MAX_TOKENS,
     EXTRACTION_MODEL_NAME,
+    GENERATION_TIMEOUT_SECONDS,
     GENERATION_MAX_TOKENS,
     GENERATION_MODEL_NAME,
 )
@@ -157,7 +158,7 @@ def test_extraction_client_has_timeout_no_sdk_retries_and_small_model():
     assert "error" not in result
     factory.assert_called_once_with(
         api_key=ANY,
-        timeout=ANTHROPIC_TIMEOUT_SECONDS,
+        timeout=EXTRACTION_TIMEOUT_SECONDS,
         max_retries=0,
     )
     kwargs = client.messages.create.call_args.kwargs
@@ -180,7 +181,7 @@ def test_generation_client_has_timeout_no_sdk_retries_and_bounded_output():
             [{"text": "Evidence", "source_file": "a.pdf", "page_number": 1}],
         )
     assert "error" not in result
-    assert factory.call_args.kwargs["timeout"] == ANTHROPIC_TIMEOUT_SECONDS
+    assert factory.call_args.kwargs["timeout"] == GENERATION_TIMEOUT_SECONDS
     assert factory.call_args.kwargs["max_retries"] == 0
     kwargs = client.messages.create.call_args.kwargs
     assert kwargs["model"] == GENERATION_MODEL_NAME
